@@ -112,6 +112,7 @@ class UGMContext:
             try:
                 pack = GameSkillPackLoader.load_pack(skills_pack_dir)
                 self.skill_packs[pack.game_id] = pack
+                self.target_resolver.register_skill_pack(pack.game_id, pack)
                 for sel_id, sel_def in pack.selectors.items():
                     if sel_def.template_file:
                         tmpl_path = pack.get_template_path(sel_def.template_file)
@@ -149,6 +150,7 @@ class UGMContext:
             storage=self.storage,
             skill_packs=self.skill_packs
         )
+        self.skill_engine.state_recognizer = self.state_recognizer
         self.skill_learner = SkillLearner(
             storage=self.storage,
             execution_engine=self.skill_engine
@@ -202,12 +204,37 @@ class UGMContext:
         return self.navigators[game_id]
 
     def _populate_hoi4_navigation_graph(self, graph: NavigationGraph) -> None:
-        nodes = ["main_map", "production", "construction", "research", "diplomacy", "recruitment"]
+        nodes = [
+            "main_menu",
+            "country_selection",
+            "main_map",
+            "politics",
+            "research",
+            "production",
+            "construction",
+            "national_focus",
+            "diplomacy",
+            "recruitment",
+            "selected_army",
+            "event_popup",
+        ]
         for nid in nodes:
-            graph.register_node(NavigationNode(node_id=nid, menu_name=nid.capitalize(), game_id="hoi4", identification_selector=""))
+            graph.register_node(NavigationNode(node_id=nid, menu_name=nid.replace("_", " ").title(), game_id="hoi4", identification_selector=""))
 
-        # Add bidirectional transitions between main_map and sub-panels
+        # Add bidirectional transitions between states
         transitions = [
+            # Main Menu & Setup
+            ("main_menu", "country_selection", "click", {"selector": "single_player"}),
+            ("country_selection", "main_map", "click", {"selector": "start_game"}),
+
+            # Politics & Focus Tree
+            ("main_map", "politics", "press_keys", {"keys": ["shift", "q"]}),
+            ("politics", "main_map", "press_keys", {"keys": ["escape"]}),
+            ("politics", "national_focus", "click", {"selector": "national_focus_slot"}),
+            ("national_focus", "politics", "press_keys", {"keys": ["escape"]}),
+            ("national_focus", "main_map", "press_keys", {"keys": ["escape"]}),
+
+            # Topbar tabs
             ("main_map", "production", "press_keys", {"keys": ["y"]}),
             ("production", "main_map", "press_keys", {"keys": ["escape"]}),
             ("main_map", "construction", "press_keys", {"keys": ["t"]}),
@@ -218,6 +245,14 @@ class UGMContext:
             ("diplomacy", "main_map", "press_keys", {"keys": ["escape"]}),
             ("main_map", "recruitment", "press_keys", {"keys": ["u"]}),
             ("recruitment", "main_map", "press_keys", {"keys": ["escape"]}),
+
+            # Military selection
+            ("main_map", "selected_army", "click", {"selector": "army_group_leader"}),
+            ("selected_army", "main_map", "press_keys", {"keys": ["escape"]}),
+
+            # Modal dialog / Event dismissal
+            ("event_popup", "main_map", "click", {"selector": "event_popup_option"}),
+            ("event_popup", "main_map", "press_keys", {"keys": ["enter"]}),
         ]
         for src, tgt, act, params in transitions:
             graph.register_edge(NavigationEdge(source_node_id=src, target_node_id=tgt, trigger_action=act, parameters=params, cost=1.0), persist=False)
@@ -903,14 +938,122 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     # 21. index_game_assets
     @server.tool()
     def index_game_assets(
-        game_path: str,
+        game_path: Optional[str] = None,
         game_id: str = "hoi4"
     ) -> Dict[str, Any]:
         """
         Extracts read-only UI metadata, sprite definitions, and localization keys from installed game files into local index cache.
-        Read-only; never alters game files or memory.
+        If game_path is omitted, auto-discovers the installed HOI4 directory. Read-only; never alters game files or memory.
         """
         return ctx.asset_indexer.index_game_directory(game_id=game_id, game_path=game_path)
+
+    # 22. hoi4_get_knowledge
+    @server.tool()
+    def hoi4_get_knowledge(
+        topic: str,
+        subtopic: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieves prebuilt HOI4 campaign knowledge, operating loops, strategic principles, and country playbooks on-demand.
+        Topics: 'meta', 'rules_and_modes', 'operating_loop', 'strategy_core', 'country' (subtopics: 'germany_fair', 'china_fair', 'poland_meta').
+        """
+        return ctx.hoi4_adapter.get_knowledge(topic=topic, subtopic=subtopic)
+
+    # 23. hoi4_detect_environment
+    @server.tool()
+    def hoi4_detect_environment(
+        custom_game_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Discovers local HOI4 installations across Steam libraries, checks running process status, and verifies OCR readiness.
+        """
+        return ctx.hoi4_adapter.detect_environment(custom_game_path=custom_game_path)
+
+    # 24. hoi4_read_topbar
+    @server.tool()
+    def hoi4_read_topbar(
+        detailed: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Performs event-driven OCR across HOI4 topbar resources (political power, stability, war support, manpower, factories).
+        If detailed=True, additionally extracts parsed date, pause status, and simulation speed.
+        """
+        frame = ctx.capture_manager.capture_frame(target_process="hoi4.exe")
+        if frame is None:
+            return {"success": False, "message": "Failed to capture screen frame for HOI4 topbar reading"}
+        metrics = ctx.hoi4_adapter.parse_topbar(ctx.ocr_engine, frame, detailed=detailed)
+        return {
+            "success": True,
+            "metrics": metrics,
+            "timestamp": time.time()
+        }
+
+    # 25. hoi4_read_tooltip
+    @server.tool()
+    def hoi4_read_tooltip(
+        target: Optional[str] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Hovers over target selector or coordinate, detects differential tooltip bounding box, and extracts tooltip text via OCR.
+        """
+        before_frame = ctx.capture_manager.capture_frame(target_process="hoi4.exe")
+
+        # Determine hover coordinates
+        cx, cy = 960, 540
+        if target:
+            res = ctx.target_resolver.resolve(target, frame=before_frame, game_id="hoi4")
+            if res.is_resolved:
+                cx, cy = res.coordinates_pixel
+        elif x is not None and y is not None:
+            cx, cy = x, y
+
+        # Dispatch safe hover action
+        ctx.input_controller.move_mouse(cx, cy)
+        time.sleep(0.35)  # Allow tooltip fade-in
+        after_frame = ctx.capture_manager.capture_frame(target_process="hoi4.exe")
+
+        if before_frame is None or after_frame is None:
+            return {"success": False, "message": "Failed to capture before/after frames for tooltip detection"}
+
+        box = ctx.hoi4_adapter.detect_tooltip(before_frame, after_frame, cursor_xy=(cx, cy))
+        if not box:
+            return {
+                "success": False,
+                "cursor": [cx, cy],
+                "message": "No tooltip appearance detected via differential analysis"
+            }
+
+        bx, by, bw, bh = box
+        H, W = after_frame.shape[:2]
+        roi = NormalizedRect(x=bx / W, y=by / H, width=bw / W, height=bh / H)
+        ocr_res = ctx.ocr_engine.read_text(after_frame, roi=roi, event_tag="hoi4_tooltip_ocr")
+
+        return {
+            "success": True,
+            "cursor": [cx, cy],
+            "box": box,
+            "roi": roi.to_dict(),
+            "text": ocr_res.full_text,
+            "confidence": max([i.confidence for i in ocr_res.items], default=0.0)
+        }
+
+    # 26. hoi4_detect_popups
+    @server.tool()
+    def hoi4_detect_popups() -> Dict[str, Any]:
+        """
+        Scans active game view for modal country events or newspaper popups using paper mask segmentation.
+        """
+        frame = ctx.capture_manager.capture_frame(target_process="hoi4.exe")
+        if frame is None:
+            return {"success": False, "message": "Failed to capture screen frame for popup detection"}
+        popups = ctx.hoi4_adapter.detect_popups(frame)
+        return {
+            "success": True,
+            "popups_count": len(popups),
+            "popups": popups
+        }
 
     return server
 

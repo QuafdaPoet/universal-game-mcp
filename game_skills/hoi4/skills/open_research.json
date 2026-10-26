@@ -1,0 +1,30 @@
+{
+  "skill_id": "open_research",
+  "version": "1.0.0",
+  "name": "Open Research Panel",
+  "description": "Opens national technology and research slots by pressing hotkey 'w'",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["w"],
+        "duration_ms": 60
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff_and_ocr",
+    "roi": {
+      "x": 0.0,
+      "y": 0.08,
+      "width": 0.35,
+      "height": 0.85
+    },
+    "expected_text": "Research",
+    "min_diff_ratio": 0.04,
+    "timeout_ms": 1500
+  }
+}

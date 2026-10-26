@@ -1,0 +1,41 @@
+{
+  "skill_id": "inspect_national_focus",
+  "version": "1.0.0",
+  "name": "Inspect National Focus Tree",
+  "description": "Opens and views current national focus tree status and branch progress",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["shift", "q"],
+        "duration_ms": 60
+      }
+    },
+    {
+      "action": "click_selector",
+      "params": {
+        "selector": "national_focus_slot"
+      }
+    },
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "national_focus"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.20,
+      "y": 0.06,
+      "width": 0.75,
+      "height": 0.88
+    },
+    "expected_text": "Focus",
+    "timeout_ms": 2000
+  }
+}

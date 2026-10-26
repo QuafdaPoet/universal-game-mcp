@@ -1,0 +1,30 @@
+{
+  "selector_id": "national_focus_slot",
+  "name": "National Focus Selection Slot",
+  "description": "Locates the primary national focus slot box in the politics drawer",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.05,
+    "y": 0.10,
+    "width": 0.28,
+    "height": 0.12
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "National Focus|Select a National Focus|No Focus",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

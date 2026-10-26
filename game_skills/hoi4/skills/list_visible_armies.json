@@ -1,0 +1,28 @@
+{
+  "skill_id": "list_visible_armies",
+  "version": "1.0.0",
+  "name": "List Visible Armies and Theaters",
+  "description": "Scans the bottom military ribbon and theater panel for army groups and division counts",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "main_map"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.08,
+      "y": 0.80,
+      "width": 0.84,
+      "height": 0.20
+    },
+    "expected_text": "",
+    "timeout_ms": 1000
+  }
+}

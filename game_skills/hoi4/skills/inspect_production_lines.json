@@ -1,0 +1,35 @@
+{
+  "skill_id": "inspect_production_lines",
+  "version": "1.0.0",
+  "name": "Inspect Military Production Lines",
+  "description": "Opens production panel and scans military equipment production lines, efficiency, and outputs",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["y"],
+        "duration_ms": 60
+      }
+    },
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "production"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.02,
+      "y": 0.12,
+      "width": 0.35,
+      "height": 0.70
+    },
+    "expected_text": "Production",
+    "timeout_ms": 1500
+  }
+}

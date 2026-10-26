@@ -1,0 +1,35 @@
+{
+  "skill_id": "inspect_research_slots",
+  "version": "1.0.0",
+  "name": "Inspect Research Slots",
+  "description": "Opens research panel and scans available technology slots and ongoing research progress",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["w"],
+        "duration_ms": 60
+      }
+    },
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "research"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.02,
+      "y": 0.12,
+      "width": 0.32,
+      "height": 0.60
+    },
+    "expected_text": "Research",
+    "timeout_ms": 1500
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "skill_id": "adjust_factory_allocation",
+  "version": "1.0.0",
+  "name": "Adjust Factory Allocation",
+  "description": "Increases or decreases military factories allocated to an active production line",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "click_selector",
+      "params": {
+        "selector": "production_line_1"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.02,
+      "y": 0.18,
+      "width": 0.35,
+      "height": 0.15
+    },
+    "min_diff_ratio": 0.01,
+    "timeout_ms": 1000
+  }
+}

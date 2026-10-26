@@ -1,0 +1,30 @@
+{
+  "skill_id": "open_politics",
+  "version": "1.0.0",
+  "name": "Open Politics Panel",
+  "description": "Opens national politics, government laws, and focus slot drawer",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["shift", "q"],
+        "duration_ms": 60
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff_and_ocr",
+    "roi": {
+      "x": 0.0,
+      "y": 0.08,
+      "width": 0.35,
+      "height": 0.85
+    },
+    "expected_text": "Government",
+    "min_diff_ratio": 0.04,
+    "timeout_ms": 1500
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "skill_id": "read_topbar",
+  "version": "1.0.0",
+  "name": "Read Topbar Metrics",
+  "description": "Performs optical character recognition over topbar resources, manpower, factories, and date",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "main_map"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 1.0,
+      "height": 0.05
+    },
+    "expected_text": "",
+    "timeout_ms": 1000
+  }
+}

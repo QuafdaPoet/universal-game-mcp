@@ -1,0 +1,30 @@
+{
+  "selector_id": "event_popup_option",
+  "name": "Event Popup Option Button",
+  "description": "Locates the primary confirmation or response button on an active event or news popup dialog",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.25,
+    "y": 0.45,
+    "width": 0.50,
+    "height": 0.30
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "OK|Very Well|We Must Prevail|Understandable|Let them come|I See|Good news",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

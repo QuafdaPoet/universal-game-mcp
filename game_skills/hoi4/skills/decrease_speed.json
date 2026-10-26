@@ -1,0 +1,29 @@
+{
+  "skill_id": "decrease_speed",
+  "version": "1.0.0",
+  "name": "Decrease Simulation Speed",
+  "description": "Decreases game simulation speed level by pressing numpad minus key",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["num-"],
+        "duration_ms": 50
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.92,
+      "y": 0.0,
+      "width": 0.08,
+      "height": 0.05
+    },
+    "min_diff_ratio": 0.005,
+    "timeout_ms": 800
+  }
+}

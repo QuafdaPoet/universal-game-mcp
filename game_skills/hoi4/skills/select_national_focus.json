@@ -1,0 +1,30 @@
+{
+  "skill_id": "select_national_focus",
+  "version": "1.0.0",
+  "name": "Select National Focus",
+  "description": "Selects a national focus node from the open tree to begin 70-day progression",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "click_coords",
+      "params": {
+        "x": 0.50,
+        "y": 0.40,
+        "button": "left"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.40,
+      "y": 0.35,
+      "width": 0.20,
+      "height": 0.20
+    },
+    "min_diff_ratio": 0.03,
+    "timeout_ms": 1500
+  }
+}

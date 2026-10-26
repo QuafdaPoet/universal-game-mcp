@@ -1,0 +1,30 @@
+{
+  "selector_id": "topbar_date",
+  "name": "Date Clock Indicator",
+  "description": "Locates the in-game calendar date and hour clock in the upper-right corner",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.82,
+    "y": 0.0,
+    "width": 0.12,
+    "height": 0.05
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "\\d{1,2}:\\d{2},\\s*\\d{1,2}\\s+[A-Za-z]+,\\s*\\d{4}",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": true,
+    "duration_ms": 200,
+    "expected_tooltip_contains": "Date"
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

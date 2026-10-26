@@ -1,0 +1,29 @@
+{
+  "skill_id": "assign_commander",
+  "version": "1.0.0",
+  "name": "Assign Army Commander",
+  "description": "Clicks the army group leader portrait slot to open general / field marshal selection",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "click_selector",
+      "params": {
+        "selector": "army_group_leader"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff_and_ocr",
+    "roi": {
+      "x": 0.15,
+      "y": 0.20,
+      "width": 0.70,
+      "height": 0.60
+    },
+    "expected_text": "Assign",
+    "min_diff_ratio": 0.05,
+    "timeout_ms": 1500
+  }
+}

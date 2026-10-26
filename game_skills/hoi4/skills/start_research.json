@@ -1,0 +1,28 @@
+{
+  "skill_id": "start_research",
+  "version": "1.0.0",
+  "name": "Start Technology Research",
+  "description": "Selects an empty research slot in the technology panel",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "click_selector",
+      "params": {
+        "selector": "research_slot_1"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.20,
+      "y": 0.10,
+      "width": 0.75,
+      "height": 0.85
+    },
+    "min_diff_ratio": 0.05,
+    "timeout_ms": 1500
+  }
+}
