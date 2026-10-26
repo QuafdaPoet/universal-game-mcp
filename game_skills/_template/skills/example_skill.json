@@ -1,0 +1,29 @@
+{
+  "skill_id": "example_skill",
+  "version": "1.0.0",
+  "name": "Open Settings Dialog",
+  "description": "Locates the settings button dynamically and clicks it, verifying dialog appearance",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "locate_and_click",
+      "selector": "example_selector",
+      "button": "left",
+      "clicks": 1,
+      "timeout_ms": 3000
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.25,
+      "y": 0.20,
+      "width": 0.50,
+      "height": 0.60
+    },
+    "min_diff_ratio": 0.02,
+    "timeout_ms": 1500
+  }
+}

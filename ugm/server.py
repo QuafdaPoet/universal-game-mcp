@@ -12,6 +12,7 @@ import base64
 import time
 import logging
 from typing import Optional, List, Dict, Any
+from dataclasses import asdict
 import cv2
 import numpy as np
 from mcp.server.mcpserver import MCPServer
@@ -23,16 +24,22 @@ from .core.types import (
     ClickResult,
     ActionResult,
     VerificationResult,
-    HoverResult
+    HoverResult,
+    TargetStatus,
+    TargetCandidate,
+    TargetResolution,
+    VisionAgentEscalation,
 )
 from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
 from .core.window import WindowManager
 from .core.capture import CaptureManager, FixtureBackend
-from .core.ocr import RapidOCREngine, BaseOCREngine
+from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
 from .core.verifier import ActionVerifier
 from .core.dataset import DatasetCollector
+from .core.target import TargetResolver, TargetExecutor
+from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
 # Ensure UTF-8 output on Windows
@@ -53,10 +60,15 @@ logger = logging.getLogger("ugm.server")
 class UGMContext:
     """Dependency container holding game MCP subsystems."""
 
-    def __init__(self, offline_fixture: Optional[str] = None):
+    def __init__(
+        self,
+        offline_fixture: Optional[str] = None,
+        ocr_backend: str = "rapidocr",
+        skills_pack_dir: Optional[str] = "game_skills/hoi4"
+    ):
         self.window_manager = WindowManager()
         self.capture_manager = CaptureManager()
-        self.ocr_engine: BaseOCREngine = RapidOCREngine(min_score=0.45, use_cls=False)
+        self.ocr_engine: BaseOCREngine = get_ocr_engine(backend=ocr_backend, min_score=0.45, use_cls=False)
         self.icon_detector = IconDetector(default_threshold=0.80)
         self.input_controller = InputController(self.window_manager, dry_run_default=False)
         self.verifier = ActionVerifier(self.capture_manager, self.ocr_engine, self.input_controller)
@@ -66,6 +78,32 @@ class UGMContext:
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
         self.hoi4_adapter.register_icons(self.icon_detector)
+
+        # Target Resolver & Executor
+        self.target_resolver = TargetResolver(self.icon_detector, self.ocr_engine, self.verifier)
+        self.target_executor = TargetExecutor(
+            self.target_resolver,
+            self.capture_manager,
+            self.input_controller,
+            self.verifier
+        )
+
+        # Loaded skill packs
+        self.skill_packs: Dict[str, GameSkillPack] = {}
+        if skills_pack_dir and os.path.isdir(skills_pack_dir):
+            try:
+                pack = GameSkillPackLoader.load_pack(skills_pack_dir)
+                self.skill_packs[pack.game_id] = pack
+                for sel_id, sel_def in pack.selectors.items():
+                    if sel_def.template_file:
+                        tmpl_path = pack.get_template_path(sel_def.template_file)
+                        if os.path.isfile(tmpl_path):
+                            try:
+                                self.icon_detector.load_template_file(sel_id, tmpl_path)
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.debug("Skill pack autoload notice for %s: %s", skills_pack_dir, e)
 
         if offline_fixture and os.path.exists(offline_fixture):
             self.setup_offline_fixture(offline_fixture)
@@ -181,7 +219,78 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         ocr_res = ctx.ocr_engine.read_text(frame, roi=norm_roi, event_tag=event_tag)
         return ocr_res.to_dict()
 
-    # 4. locate_icon
+    # 4. locate_ui_element
+    @server.tool()
+    def locate_ui_element(
+        selector_id: Optional[str] = None,
+        icon_name: Optional[str] = None,
+        template_base64: Optional[str] = None,
+        text_query: Optional[str] = None,
+        roi: Optional[List[float]] = None,
+        threshold: float = 0.80,
+        score_tolerance: float = 0.05,
+        hover_verification: bool = False,
+        expected_tooltip: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Locates a UI element via template matching, OCR text query, or registered selector.
+        Detects ambiguity and generates external Vision Agent escalation payload when uncertain.
+        """
+        t0 = time.perf_counter()
+        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
+        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+
+        custom_img = None
+        if template_base64:
+            raw_bytes = base64.b64decode(template_base64)
+            nparr = np.frombuffer(raw_bytes, np.uint8)
+            custom_img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+
+        resolved_icon_name = icon_name
+        resolved_text_pattern = text_query
+        resolved_roi = norm_roi
+        resolved_threshold = threshold
+        resolved_hover = hover_verification
+        resolved_tooltip = expected_tooltip
+
+        if selector_id:
+            for pack in ctx.skill_packs.values():
+                if selector_id in pack.selectors:
+                    sel = pack.selectors[selector_id]
+                    if not resolved_icon_name and sel.template_file:
+                        resolved_icon_name = selector_id
+                    if not resolved_text_pattern and sel.text_pattern:
+                        resolved_text_pattern = sel.text_pattern
+                    if not resolved_roi and sel.search_roi:
+                        resolved_roi = sel.search_roi
+                    resolved_threshold = sel.threshold
+                    resolved_hover = sel.hover_verification
+                    resolved_tooltip = sel.expected_tooltip_contains
+                    break
+
+        resolution = ctx.target_resolver.resolve_target(
+            frame=frame,
+            icon_name=resolved_icon_name,
+            template_image=custom_img,
+            text_pattern=resolved_text_pattern,
+            search_roi=resolved_roi,
+            threshold=resolved_threshold,
+            score_tolerance=score_tolerance,
+            hover_verification=resolved_hover,
+            expected_tooltip=resolved_tooltip,
+            selector_id=selector_id
+        )
+
+        res_dict = resolution.to_dict()
+        res_dict["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        res_dict["threshold"] = resolved_threshold
+        res_dict["roi_normalized"] = asdict(resolved_roi) if resolved_roi else None
+        res_dict["count"] = len(resolution.all_candidates)
+        res_dict["items"] = [c.to_dict() for c in resolution.all_candidates]
+        res_dict["is_ambiguous"] = (resolution.status == TargetStatus.AMBIGUOUS.value)
+        return res_dict
+
+    # 4b. locate_icon (Backward compatible adapter)
     @server.tool()
     def locate_icon(
         icon_name: Optional[str] = None,
@@ -193,23 +302,12 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Locates occurrences of an icon in the game window using OpenCV template matching with NMS.
         Returns normalized bounding boxes, center coordinates, and flags ambiguity if multiple matches compete.
         """
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-
-        custom_img = None
-        if template_base64:
-            raw_bytes = base64.b64decode(template_base64)
-            nparr = np.frombuffer(raw_bytes, np.uint8)
-            custom_img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
-
-        res = ctx.icon_detector.locate_icon(
-            image=frame,
-            template_name=icon_name,
-            template_image=custom_img,
-            roi=norm_roi,
+        return locate_ui_element(
+            icon_name=icon_name,
+            template_base64=template_base64,
+            roi=roi,
             threshold=threshold
         )
-        return res.to_dict()
 
     # 5. hover_target
     @server.tool()
@@ -218,7 +316,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         y: float,
         duration_ms: int = 500,
         read_tooltip: bool = True,
-        dry_run: bool = False
+        dry_run: bool = False,
+        timeout_s: float = 5.0
     ) -> Dict[str, Any]:
         """
         Moves the mouse cursor to normalized coordinates (x, y) [0.0 - 1.0] and hovers.
@@ -252,46 +351,60 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     # 6. click_target
     @server.tool()
     def click_target(
-        x: float,
-        y: float,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        selector_id: Optional[str] = None,
+        text_query: Optional[str] = None,
+        icon_name: Optional[str] = None,
         button: str = "left",
         clicks: int = 1,
         dry_run: bool = False,
-        verify: bool = True
+        verify: bool = True,
+        expected_text: Optional[str] = None,
+        verification_roi: Optional[List[float]] = None,
+        min_diff_ratio: float = 0.005,
+        timeout_s: float = 5.0
     ) -> Dict[str, Any]:
         """
-        Safely clicks at normalized coordinates (x, y) within the game window via DirectInput.
-        Supports dry-run and post-click visual verification.
+        Safely clicks at normalized coordinates (x, y) or dynamically resolves target selector/query.
+        Always verifies visual state change; never reports success solely because a mouse click was dispatched.
         """
-        pre_frame = None
-        if verify:
-            pre_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        norm_ver_roi = NormalizedRect(
+            verification_roi[0], verification_roi[1], verification_roi[2], verification_roi[3]
+        ) if verification_roi and len(verification_roi) == 4 else None
 
-        click_res = ctx.input_controller.click(
+        target_resolution = None
+        if (x is None or y is None) and (selector_id or text_query or icon_name):
+            frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+            target_resolution = ctx.target_resolver.resolve_target(
+                frame=frame,
+                icon_name=icon_name,
+                text_pattern=text_query,
+                selector_id=selector_id,
+                dry_run=dry_run
+            )
+
+        click_res = ctx.target_executor.click_and_verify(
             norm_x=x,
             norm_y=y,
+            target_resolution=target_resolution,
             button=button,
             clicks=clicks,
-            dry_run=dry_run
+            dry_run=dry_run,
+            expected_text=expected_text,
+            verification_roi=norm_ver_roi,
+            min_diff_ratio=min_diff_ratio if verify else 0.0,
+            timeout_s=timeout_s
         )
-
-        verification_passed = None
-        if verify and click_res.executed and pre_frame is not None:
-            time.sleep(0.08)
-            post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-            ver_res = ctx.verifier.verify_selection(pre_frame, post_frame)
-            verification_passed = ver_res.verified
-            click_res.verification_passed = verification_passed
-
-        res_dict = click_res.to_dict()
-        return res_dict
+        return click_res.to_dict()
 
     # 7. press_keys
     @server.tool()
     def press_keys(
         keys: List[str],
         duration_ms: int = 100,
-        dry_run: bool = False
+        dry_run: bool = False,
+        timeout_s: float = 5.0
     ) -> Dict[str, Any]:
         """
         Dispatches keystrokes to the target game window (e.g. ['space'] to pause/unpause HOI4).
@@ -303,7 +416,37 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         )
         return res.to_dict()
 
-    # 8. verify_selection
+    # 8. verify_state
+    @server.tool()
+    def verify_state(
+        expected_text: Optional[str] = None,
+        roi: Optional[List[float]] = None,
+        pre_capture_id: Optional[str] = None,
+        min_diff_ratio: float = 0.005
+    ) -> Dict[str, Any]:
+        """
+        Verifies visual game state comparing against pre_capture_id or baseline frame.
+        Optionally validates that expected_text appears in the target ROI.
+        """
+        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
+        post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+
+        pre_frame = None
+        if pre_capture_id and pre_capture_id in ctx.pre_capture_cache:
+            pre_frame = ctx.pre_capture_cache[pre_capture_id]
+        else:
+            pre_frame = post_frame
+
+        ver_res = ctx.verifier.verify_selection(
+            pre_frame=pre_frame,
+            post_frame=post_frame,
+            roi=norm_roi,
+            expected_text=expected_text,
+            min_diff_ratio=min_diff_ratio
+        )
+        return ver_res.to_dict()
+
+    # 8b. verify_selection (Backward compatible adapter)
     @server.tool()
     def verify_selection(
         expected_text: Optional[str] = None,
@@ -314,23 +457,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Verifies visual state change comparing against pre_capture_id or baseline frame.
         Optionally validates that expected_text appears in the target ROI.
         """
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-
-        pre_frame = None
-        if pre_capture_id and pre_capture_id in ctx.pre_capture_cache:
-            pre_frame = ctx.pre_capture_cache[pre_capture_id]
-        else:
-            # If no cached capture, use current frame as baseline
-            pre_frame = post_frame
-
-        ver_res = ctx.verifier.verify_selection(
-            pre_frame=pre_frame,
-            post_frame=post_frame,
-            roi=norm_roi,
-            expected_text=expected_text
+        return verify_state(
+            expected_text=expected_text,
+            roi=roi,
+            pre_capture_id=pre_capture_id
         )
-        return ver_res.to_dict()
 
     # 9. emergency_stop
     @server.tool()

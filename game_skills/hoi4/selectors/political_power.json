@@ -1,0 +1,34 @@
+{
+  "selector_id": "political_power",
+  "name": "Political Power Counter",
+  "description": "Locates the political power scroll icon and current numerical reserve",
+  "type": "composite",
+  "strategy": {
+    "primary": "template_match",
+    "secondary": "ocr_text"
+  },
+  "search_roi": {
+    "x": 0.03,
+    "y": 0.0,
+    "width": 0.08,
+    "height": 0.05
+  },
+  "template": {
+    "template_file": "templates/political_power.png",
+    "threshold": 0.80,
+    "multi_scale": true
+  },
+  "text_criteria": {
+    "pattern": "\\d+",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": true,
+    "duration_ms": 250,
+    "expected_tooltip_contains": "Political Power"
+  },
+  "ambiguity_handling": {
+    "strategy": "reject_or_escalate",
+    "score_tolerance": 0.05
+  }
+}

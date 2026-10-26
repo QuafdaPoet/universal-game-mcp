@@ -1,0 +1,30 @@
+{
+  "selector_id": "recruit_tab",
+  "name": "Recruit & Deploy Navigation Tab",
+  "description": "Locates the Recruit and Deploy division navigation icon on the upper left bar",
+  "type": "composite",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": "template_match"
+  },
+  "search_roi": {
+    "x": 0.0,
+    "y": 0.04,
+    "width": 0.30,
+    "height": 0.06
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "Recruit|Deploy",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": true,
+    "duration_ms": 200,
+    "expected_tooltip_contains": "Recruit"
+  },
+  "ambiguity_handling": {
+    "strategy": "reject_or_escalate",
+    "score_tolerance": 0.05
+  }
+}

@@ -28,6 +28,7 @@ data/
 !tests/fixtures/*.png
 !tests/fixtures/icons/*.png
 !ugm/adapters/hoi4/icons/*.png
+!game_skills/**/templates/*.png
 
 # Logs, scratch & local artifacts
 *.log

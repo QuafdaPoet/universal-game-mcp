@@ -173,6 +173,36 @@ class DetectionItem:
 
 
 @dataclass
+class VisionAgentEscalation:
+    """Escalation payload when local perception encounters ambiguity or uncertainty."""
+    needed: bool
+    reason: str
+    target_type: str = "ui_element"
+    crop_base64: Optional[str] = None
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    suggested_prompt: str = ""
+    roi_normalized: Optional[NormalizedRect] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "needed": self.needed,
+            "reason": self.reason,
+            "target_type": self.target_type,
+            "crop_base64": self.crop_base64,
+            "candidates": self.candidates,
+            "suggested_prompt": self.suggested_prompt,
+            "roi_normalized": asdict(self.roi_normalized) if self.roi_normalized else None,
+        }
+
+
+class TargetStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    AMBIGUOUS = "ambiguous"
+    NOT_FOUND = "not_found"
+
+
+@dataclass
 class DetectionResult:
     """Result of an icon detection query."""
     items: List[DetectionItem]
@@ -180,6 +210,8 @@ class DetectionResult:
     is_ambiguous: bool
     threshold: float
     roi_normalized: Optional[NormalizedRect] = None
+    status: str = "found"
+    escalation: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +221,8 @@ class DetectionResult:
             "threshold": self.threshold,
             "count": len(self.items),
             "roi_normalized": asdict(self.roi_normalized) if self.roi_normalized else None,
+            "status": self.status,
+            "escalation": self.escalation,
         }
 
 
@@ -229,6 +263,8 @@ class ClickResult:
     verification_passed: Optional[bool]
     reason: str
     latency_ms: float
+    status: str = "success"  # "success", "failed", "ambiguous", "not_found"
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -243,6 +279,61 @@ class ClickResult:
             "verification_passed": self.verification_passed,
             "reason": self.reason,
             "latency_ms": round(self.latency_ms, 2),
+            "status": self.status,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass
+class TargetCandidate:
+    """A visual or OCR candidate for target resolution."""
+    candidate_id: str
+    candidate_type: str  # "icon", "text", "composite"
+    confidence: float
+    bbox_pixel: BoundingBox
+    bbox_normalized: NormalizedRect
+    center_normalized: Tuple[float, float]
+    text: Optional[str] = None
+    tooltip_text: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "candidate_type": self.candidate_type,
+            "confidence": round(self.confidence, 4),
+            "bbox_pixel": asdict(self.bbox_pixel),
+            "bbox_normalized": asdict(self.bbox_normalized),
+            "center_normalized": self.center_normalized,
+            "text": self.text,
+            "tooltip_text": self.tooltip_text,
+            "details": self.details,
+        }
+
+
+@dataclass
+class TargetResolution:
+    """Result of resolving a target query against screen visual state."""
+    status: str  # "found", "ambiguous", "not_found", "rejected"
+    selector_id: Optional[str] = None
+    target_candidate: Optional[TargetCandidate] = None
+    all_candidates: List[TargetCandidate] = field(default_factory=list)
+    coordinates_normalized: Optional[Tuple[float, float]] = None
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    escalation: Optional[VisionAgentEscalation] = None
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "selector_id": self.selector_id,
+            "target": self.target_candidate.to_dict() if self.target_candidate else None,
+            "candidates_count": len(self.all_candidates),
+            "candidates": [c.to_dict() for c in self.all_candidates],
+            "coordinates_normalized": self.coordinates_normalized,
+            "evidence": self.evidence,
+            "escalation": self.escalation.to_dict() if self.escalation else None,
+            "reason": self.reason,
         }
 
 

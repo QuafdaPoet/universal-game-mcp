@@ -1,0 +1,29 @@
+{
+  "skill_id": "select_army_group",
+  "version": "1.0.0",
+  "name": "Select Army Group Commander",
+  "description": "Locates the army group commander portrait dynamically, verifies via hover tooltip, and clicks to select",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "locate_and_click",
+      "selector": "army_group_leader",
+      "button": "left",
+      "clicks": 1,
+      "timeout_ms": 3000
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.10,
+      "y": 0.85,
+      "width": 0.80,
+      "height": 0.15
+    },
+    "min_diff_ratio": 0.01,
+    "timeout_ms": 1000
+  }
+}

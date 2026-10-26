@@ -1,0 +1,30 @@
+{
+  "skill_id": "open_production",
+  "version": "1.0.0",
+  "name": "Open Production Panel",
+  "description": "Opens military production and shipyard queue by pressing hotkey 'y' or clicking tab",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["y"],
+        "duration_ms": 60
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff_and_ocr",
+    "roi": {
+      "x": 0.0,
+      "y": 0.10,
+      "width": 0.35,
+      "height": 0.85
+    },
+    "expected_text": "Production",
+    "min_diff_ratio": 0.05,
+    "timeout_ms": 1500
+  }
+}

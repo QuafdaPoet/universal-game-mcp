@@ -15,6 +15,10 @@ def setup_function():
     safety_manager.reset_emergency_stop()
 
 
+def teardown_function():
+    safety_manager.reset_emergency_stop()
+
+
 def test_emergency_stop_trigger_and_check():
     assert safety_manager.is_stopped is False
     safety_manager.check_safety()  # Should not raise

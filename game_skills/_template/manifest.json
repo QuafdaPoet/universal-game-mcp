@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/universal-game-mcp/schemas/v1/game-skill-pack.json",
+  "schema_version": "1.0.0",
+  "game_id": "game_template",
+  "name": "Game Skill Pack Template",
+  "version": "1.0.0",
+  "author": "Community Contributor",
+  "description": "Template skill pack demonstrating selectors, skills, and image template structure.",
+  "game_metadata": {
+    "process_names": ["game.exe"],
+    "window_titles": ["Game Title"],
+    "base_resolution": [1920, 1080],
+    "supported_resolutions": ["1920x1080"],
+    "dpi_aware": true
+  },
+  "selectors_path": "selectors",
+  "skills_path": "skills",
+  "templates_path": "templates",
+  "selectors": [
+    "example_selector"
+  ],
+  "skills": [
+    "example_skill"
+  ]
+}

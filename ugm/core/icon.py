@@ -109,7 +109,8 @@ class IconDetector:
         template_image: Optional[np.ndarray] = None,
         roi: Optional[NormalizedRect] = None,
         threshold: Optional[float] = None,
-        multi_scale: bool = True
+        multi_scale: bool = True,
+        score_tolerance: float = 0.05
     ) -> DetectionResult:
         """
         Locates occurrences of an icon in the target image.
@@ -229,13 +230,24 @@ class IconDetector:
             )
             items.append(item)
 
-        # Ambiguity check: if 2 or more distinct matches have nearly identical confidence (>95% ratio)
+        # Ambiguity check: if 2 or more distinct matches have nearly identical confidence
         is_ambiguous = False
+        escalation = None
+        status = "found" if items else "not_found"
+
         if len(items) >= 2:
             top_score = items[0].confidence
             second_score = items[1].confidence
-            if second_score >= top_score * 0.95:
+            if second_score >= top_score * (1.0 - score_tolerance):
                 is_ambiguous = True
+                status = "ambiguous"
+                escalation = {
+                    "needed": True,
+                    "reason": f"Multiple matching candidates with score difference within {score_tolerance * 100:.1f}%",
+                    "target_type": "icon",
+                    "candidates": [item.to_dict() for item in items[:4]],
+                    "suggested_prompt": f"Disambiguate between {len(items)} candidate visual matches for template '{icon_tag}'",
+                }
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -244,5 +256,7 @@ class IconDetector:
             latency_ms=latency_ms,
             is_ambiguous=is_ambiguous,
             threshold=thresh,
-            roi_normalized=roi
+            roi_normalized=roi,
+            status=status,
+            escalation=escalation
         )

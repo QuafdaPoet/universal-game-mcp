@@ -1,0 +1,29 @@
+{
+  "skill_id": "increase_speed",
+  "version": "1.0.0",
+  "name": "Increase Game Speed",
+  "description": "Increases game simulation tick rate by pressing numpad +",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["num+"],
+        "duration_ms": 50
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.93,
+      "y": 0.0,
+      "width": 0.07,
+      "height": 0.045
+    },
+    "min_diff_ratio": 0.005,
+    "timeout_ms": 1000
+  }
+}

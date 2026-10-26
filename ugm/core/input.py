@@ -16,6 +16,13 @@ from .window import WindowManager
 
 logger = logging.getLogger("ugm.input")
 
+try:
+    import pydirectinput
+    # UGM enforces its own window bounds checking and safety manager emergency stop
+    pydirectinput.FAILSAFE = False
+except Exception:
+    pass
+
 
 class InputController:
     """

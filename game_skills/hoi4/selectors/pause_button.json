@@ -1,0 +1,31 @@
+{
+  "selector_id": "pause_button",
+  "name": "Game Speed Pause Button",
+  "description": "Locates the pause button widget next to the world clock",
+  "type": "icon",
+  "strategy": {
+    "primary": "template_match",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.82,
+    "y": 0.0,
+    "width": 0.18,
+    "height": 0.08
+  },
+  "template": {
+    "template_file": "templates/pause_btn.png",
+    "threshold": 0.85,
+    "multi_scale": true
+  },
+  "text_criteria": null,
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "reject_or_escalate",
+    "score_tolerance": 0.05
+  }
+}

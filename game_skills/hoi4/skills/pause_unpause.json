@@ -1,0 +1,29 @@
+{
+  "skill_id": "pause_unpause",
+  "version": "1.0.0",
+  "name": "Toggle Pause / Unpause",
+  "description": "Toggles simulation pause state via DirectInput spacebar or clicking the pause widget",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["space"],
+        "duration_ms": 50
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.85,
+      "y": 0.045,
+      "width": 0.08,
+      "height": 0.035
+    },
+    "min_diff_ratio": 0.005,
+    "timeout_ms": 1000
+  }
+}

@@ -71,20 +71,51 @@ Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64) unde
 
 ---
 
-## 🛠 Standard MCP Tools (10 Tools)
+## 🛠 Standard MCP Tools
 
-| # | Tool Name | Description |
+| Tool Name | Prioritized V1 Capabilities | Description |
 |---|---|---|
-| 1 | `get_game_window` | Finds and attaches to target game window; returns client rectangle and focus state. |
-| 2 | `capture_screen` | Captures current game frame (supports ROI cropping, Base64 preview, and disk saving). |
-| 3 | `read_text` | Event-driven RapidOCR (PP-OCRv4 CPU) reading on normalized ROI. |
-| 4 | `locate_icon` | Multi-scale OpenCV template matching with NMS and ambiguity detection. |
-| 5 | `hover_target` | Hovers mouse at normalized coordinates `(x, y)` and reads popup tooltip via OCR. |
-| 6 | `click_target` | Safe DirectInput click within target window (supports `dry_run` and visual verification). |
-| 7 | `press_keys` | Sends DirectInput keystrokes (e.g. `['space']` for pause). |
-| 8 | `verify_selection` | Computes visual state difference between pre- and post-action frames. |
-| 9 | `emergency_stop` | Instant emergency killswitch halting all actions. |
-| 10 | `save_training_sample` | Opt-in recording of annotated game frames to `data/samples/`. |
+| `get_game_window` | Windows geometry & DPI scaling | Finds and attaches to target game window; returns client rectangle, DPI scale, and focus state. |
+| `capture_screen` | Native resolution capture | Captures current game frame (supports ROI cropping, Base64 preview, and disk saving). |
+| `read_text` | Small UI text & ROI OCR | Event-driven RapidOCR reading on normalized ROI with small-text enhancement. |
+| `locate_ui_element` | Multimodal target resolution | Locates UI elements via icon template, OCR text, or registered selector with ambiguity detection. |
+| `locate_icon` | Backward-compatible alias | Multi-scale OpenCV template matching with NMS and ambiguity detection. |
+| `hover_target` | Tooltip verification | Hovers mouse at normalized `(x, y)` and reads popup tooltip via event OCR. |
+| `click_target` | State verification & dynamic targets | Clicks at coordinates `(x, y)` or dynamically resolved selectors; verifies visual state before confirming success. |
+| `press_keys` | DirectInput keystrokes | Sends DirectInput keystrokes (e.g. `['space']` for pause, `['num+']` for speed) with timeout. |
+| `verify_state` | Visual diff & text check | Computes visual state difference and optional expected text verification. |
+| `verify_selection` | Backward-compatible alias | Legacy alias for visual state change verification. |
+| `emergency_stop` | Safety killswitch | Instant emergency killswitch halting all inputs and rejecting subsequent actions. |
+| `save_training_sample` | Privacy-first dataset | Opt-in recording of annotated game frames to `data/samples/`. |
+
+---
+
+## 🎮 Game Skills Architecture (Modular & Independent)
+
+The `game_skills/` directory provides game-independent declarative manifests, UI selectors, templates, and macro skills:
+
+```text
+game_skills/
+├── README.md                      # Architecture and specifications
+├── _template/                     # Starter template for new games
+│   ├── manifest.json              # Versioned manifest schema (1.0.0)
+│   ├── skills/                    # Atomic skills (e.g. example_skill.json)
+│   ├── selectors/                 # Visual and OCR selectors (e.g. example_selector.json)
+│   └── templates/                 # CV image templates
+└── hoi4/                          # Hearts of Iron IV reference pack
+    ├── manifest.json              # HOI4 metadata, process names, resolutions
+    ├── README.md                  # HOI4 reference pack documentation
+    ├── skills/                    # pause_unpause, open_production, select_army_group, increase_speed
+    ├── selectors/                 # topbar_factories, political_power, pause_button, army_group_leader
+    ├── templates/                 # PNG templates for template matching
+    └── tests/                     # Manifest validation fixtures
+```
+
+- **Reference Pack**: HOI4 is the first reference game pack, not a dependency of MCP Core.
+- **Dynamic Selectors**: Avoids hardcoding screen pixel coordinates; resolves elements dynamically.
+- **Strict Verification**: Never reports success based solely on whether a mouse click was sent; compares pre/post frames.
+- **Ambiguity Rejection**: Rejects ambiguous targets and outputs structured `VisionAgentEscalation` payloads when uncertain.
+- **V1.5 Contract Preparation**: Defines lightweight interface specifications for Registry, Knowledge Storage, and Navigation Graph without early implementation.
 
 ---
 
@@ -120,7 +151,7 @@ python scripts/generate_fixtures.py
 ```powershell
 pytest -v
 ```
-*All 36 unit and integration tests run entirely offline using image fixtures.*
+*All 58 unit and integration tests run entirely offline using image fixtures.*
 
 ### 4. Run the CPU Latency & RAM Benchmark
 

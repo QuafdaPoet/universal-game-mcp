@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/universal-game-mcp/schemas/v1/game-skill-pack.json",
+  "schema_version": "1.0.0",
+  "game_id": "hoi4",
+  "name": "Hearts of Iron IV Reference Pack",
+  "version": "1.0.0",
+  "author": "Universal Game MCP Team",
+  "description": "Reference skill pack for Hearts of Iron IV (HOI4). Provides perception selectors for topbar resources, army groups, tabs, and atomic skills with verification.",
+  "game_metadata": {
+    "process_names": ["hoi4.exe"],
+    "window_titles": ["Hearts of Iron IV"],
+    "base_resolution": [1920, 1080],
+    "supported_resolutions": ["1920x1080", "2560x1440"],
+    "dpi_aware": true
+  },
+  "selectors_path": "selectors",
+  "skills_path": "skills",
+  "templates_path": "templates",
+  "selectors": [
+    "topbar_factories",
+    "political_power",
+    "pause_button",
+    "army_group_leader",
+    "recruit_tab"
+  ],
+  "skills": [
+    "pause_unpause",
+    "open_production",
+    "select_army_group",
+    "increase_speed"
+  ]
+}

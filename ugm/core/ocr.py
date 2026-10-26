@@ -12,6 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Any
 import numpy as np
+import cv2
 
 from .types import OCRItem, OCRResult, NormalizedRect, BoundingBox
 
@@ -101,6 +102,18 @@ class RapidOCREngine(BaseOCREngine):
                 event_tag=event_tag
             )
 
+        # Optimization for small game UI text:
+        # If crop height < 32px or width < 48px, upscale to enhance detection accuracy
+        scale_factor = 1.0
+        ch, cw = crop_img.shape[:2]
+        if ch < 32 or cw < 48:
+            scale_factor = 2.0
+            crop_img = cv2.resize(
+                crop_img,
+                (int(cw * scale_factor), int(ch * scale_factor)),
+                interpolation=cv2.INTER_CUBIC
+            )
+
         # Run inference
         ocr_res, _elapse = self._engine(crop_img)
 
@@ -113,8 +126,11 @@ class RapidOCREngine(BaseOCREngine):
                 if score < self.min_score:
                     continue
 
-                # Map points back to full image/window coordinates
+                # Map points back to original unscaled coordinates
                 pts_arr = np.array(pts, dtype=np.float32)
+                if scale_factor != 1.0:
+                    pts_arr = pts_arr / scale_factor
+
                 pts_arr[:, 0] += crop_offset_x
                 pts_arr[:, 1] += crop_offset_y
 
@@ -196,6 +212,24 @@ class WinRTOcrEngine(BaseOCREngine):
         raise NotImplementedError("Use RapidOCREngine for unified high-accuracy OCR")
 
 
+class RapidOCRLiteEngine(RapidOCREngine):
+    """
+    Lightweight variant of RapidOCR configured for minimal CPU consumption
+    on resource-constrained systems (e.g. Ryzen 5 5500U with 2 worker threads).
+    """
+
+    def __init__(
+        self,
+        min_score: float = 0.50,
+        intra_op_threads: int = 2
+    ):
+        super().__init__(
+            min_score=min_score,
+            use_cls=False,
+            intra_op_threads=intra_op_threads
+        )
+
+
 class MockOCREngine(BaseOCREngine):
     """Deterministic OCR engine for offline testing without ONNX runtime."""
 
@@ -220,3 +254,26 @@ class MockOCREngine(BaseOCREngine):
             roi_normalized=roi,
             event_tag=event_tag
         )
+
+
+def get_ocr_engine(backend: str = "rapidocr", **kwargs: Any) -> BaseOCREngine:
+    """
+    Pluggable OCR Engine factory.
+    Supported backends: 'rapidocr' (default), 'rapidocr_lite', 'winrt', 'mock'.
+    """
+    b = backend.lower().strip()
+    if b == "rapidocr":
+        return RapidOCREngine(**kwargs)
+    elif b in ("rapidocr_lite", "rapidocrlite", "lite"):
+        return RapidOCRLiteEngine(**kwargs)
+    elif b == "winrt":
+        engine = WinRTOcrEngine(**kwargs)
+        if not engine.is_available:
+            logger.warning("WinRT OCR is not available on this system; falling back to RapidOCR.")
+            return RapidOCREngine(**kwargs)
+        return engine
+    elif b == "mock":
+        return MockOCREngine(**kwargs)
+    else:
+        raise ValueError(f"Unknown OCR backend '{backend}'. Supported: 'rapidocr', 'rapidocr_lite', 'winrt', 'mock'")
+
