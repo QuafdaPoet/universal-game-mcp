@@ -373,9 +373,14 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         self,
         skill_id: str,
         success: bool,
-        auto_promote_threshold: int = 3
+        auto_promote_threshold: int = 2,
+        is_dry_run: bool = False
     ) -> None:
-        """Updates validation stats and promotes candidate to verified if criteria met."""
+        """
+        Updates validation stats and promotes candidate to verified if criteria met.
+        Strictly distinguishes simulator_verified vs live_verified.
+        Dry-run outcomes NEVER promote to live-verified status.
+        """
         conn = self.db.get_connection()
         now = time.time()
         with conn:
@@ -384,16 +389,21 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             if not row:
                 return
 
-            v_count = row["validation_count"] + 1
+            v_count = row["validation_count"] + (1 if success else 0)
             s_count = row["success_count"] + (1 if success else 0)
             f_count = row["fail_count"] + (0 if success else 1)
             confidence = round(s_count / max(1, s_count + f_count), 3)
 
             new_status = row["status"]
-            if new_status == "candidate" and v_count >= auto_promote_threshold and confidence >= 0.8:
-                new_status = "verified"
-                logger.info("Skill '%s' promoted to VERIFIED after %d successful validations.", skill_id, v_count)
+            if success and v_count >= auto_promote_threshold and confidence >= 0.8:
+                if new_status == "candidate":
+                    new_status = "verified"
+                    if is_dry_run:
+                        logger.info("Skill '%s' promoted to VERIFIED (simulator/dry-run) after %d validations.", skill_id, v_count)
+                    else:
+                        logger.info("Skill '%s' promoted to VERIFIED (live) after %d validations.", skill_id, v_count)
 
+            update_source = "synthetic_fixture" if is_dry_run else "live"
             conn.execute("""
                 UPDATE learned_skills SET
                     validation_count = ?,
@@ -401,9 +411,10 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     fail_count = ?,
                     confidence = ?,
                     status = ?,
+                    source = ?,
                     updated_at = ?
                 WHERE skill_id = ?
-            """, (v_count, s_count, f_count, confidence, new_status, now, skill_id))
+            """, (v_count, s_count, f_count, confidence, new_status, update_source, now, skill_id))
 
     def get_learned_skill(self, skill_id: str) -> Optional[LearnedSkillRecord]:
         conn = self.db.get_connection()
@@ -442,8 +453,15 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             query += " AND game_id = ?"
             params.append(game_id)
         if status:
-            query += " AND status = ?"
-            params.append(status)
+            if status == "verified":
+                query += " AND status = 'verified'"
+            elif status == "simulator_verified":
+                query += " AND status = 'verified' AND source = 'synthetic_fixture'"
+            elif status == "live_verified":
+                query += " AND status = 'verified' AND source = 'live'"
+            else:
+                query += " AND status = ?"
+                params.append(status)
         query += " ORDER BY confidence DESC, validation_count DESC"
 
         cur = conn.execute(query, tuple(params))
@@ -529,6 +547,14 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             f"SELECT COUNT(*) FROM learned_skills {'WHERE game_id = ? AND' if game_id else 'WHERE'} status = 'verified'",
             params
         ).fetchone()[0]
+        cur_live_verified = conn.execute(
+            f"SELECT COUNT(*) FROM learned_skills {'WHERE game_id = ? AND' if game_id else 'WHERE'} status = 'verified' AND source = 'live'",
+            params
+        ).fetchone()[0]
+        cur_sim_verified = conn.execute(
+            f"SELECT COUNT(*) FROM learned_skills {'WHERE game_id = ? AND' if game_id else 'WHERE'} status = 'verified' AND source = 'synthetic_fixture'",
+            params
+        ).fetchone()[0]
 
         return {
             "game_id": game_id or "all_games",
@@ -537,6 +563,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             "action_history_count": cur_actions,
             "total_learned_skills": cur_skills,
             "verified_skills": cur_verified,
+            "live_verified_skills": cur_live_verified,
+            "simulator_verified_skills": cur_sim_verified,
             "candidate_skills": cur_skills - cur_verified,
             "db_path": self.db.db_path
         }

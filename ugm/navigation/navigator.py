@@ -144,11 +144,16 @@ class UINavigator:
             )
 
         # Step 3: Traverse planned edges sequentially
-        steps_total = len(path_res.edges)
+        remaining_edges = list(path_res.edges)
+        steps_total = len(remaining_edges)
         steps_executed = 0
         retries_remaining = max_retries
+        step_idx = 0
 
-        for idx, edge in enumerate(path_res.edges):
+        while remaining_edges:
+            edge = remaining_edges.pop(0)
+            step_idx += 1
+
             # Check safety killswitch before every action
             safety_manager.check_safety()
 
@@ -157,7 +162,7 @@ class UINavigator:
 
             logger.info(
                 "Navigating step [%d/%d]: '%s' -> '%s' via %s(%s)",
-                idx + 1, steps_total, edge.source_node_id, expected_next,
+                step_idx, steps_total, edge.source_node_id, expected_next,
                 edge.trigger_action, edge.parameters
             )
 
@@ -165,7 +170,7 @@ class UINavigator:
             exec_ok, exec_err = self._dispatch_navigation_action(edge, dry_run=effective_dry_run)
             if not exec_ok:
                 step_log = NavigationStepLog(
-                    step_index=idx + 1,
+                    step_index=step_idx,
                     from_state=current_state,
                     expected_to_state=expected_next,
                     observed_to_state=current_state,
@@ -193,7 +198,7 @@ class UINavigator:
                     steps_total=steps_total,
                     step_logs=[asdict(s) for s in step_logs],
                     dry_run=effective_dry_run,
-                    message=f"Navigation aborted at step {idx + 1}: {exec_err}",
+                    message=f"Navigation aborted at step {step_idx}: {exec_err}",
                     latency_ms=(time.perf_counter() - t0) * 1000.0
                 )
 
@@ -208,11 +213,11 @@ class UINavigator:
             else:
                 post_det = self.recognizer.recognize_state(post_frame, game_id=game_id)
                 observed_state = post_det.state_name
-                step_verified = (observed_state == expected_next or (idx == steps_total - 1 and observed_state == target_state))
+                step_verified = (observed_state == expected_next or (not remaining_edges and observed_state == target_state))
 
             # Record step log and transition feedback
             step_log = NavigationStepLog(
-                step_index=idx + 1,
+                step_index=step_idx,
                 from_state=current_state,
                 expected_to_state=expected_next,
                 observed_to_state=observed_state,
@@ -236,15 +241,15 @@ class UINavigator:
 
             if not step_verified:
                 if retries_remaining > 0:
-                    logger.warning("Navigation step %d transition verification failed. Attempting replan...", idx + 1)
+                    logger.warning("Navigation step %d transition verification failed. Attempting replan...", step_idx)
                     retries_remaining -= 1
                     # Attempt replanning from the currently observed state
                     replan = self.graph.plan_route(observed_state, target_state)
                     if replan.found and replan.edges:
                         logger.info("Replanned alternate route with %d remaining steps.", len(replan.edges))
                         # Replace rest of queue with replanned route
-                        path_res.edges = replan.edges
-                        steps_total = steps_executed + len(replan.edges)
+                        remaining_edges = list(replan.edges)
+                        steps_total = steps_executed + len(remaining_edges)
                         current_state = observed_state
                         continue
 
@@ -259,7 +264,7 @@ class UINavigator:
                     step_logs=[asdict(s) for s in step_logs],
                     dry_run=effective_dry_run,
                     message=(
-                        f"Navigation failed at step {idx + 1}: Expected state '{expected_next}', "
+                        f"Navigation failed at step {step_idx}: Expected state '{expected_next}', "
                         f"but observed '{observed_state}'. Safely halted without blind inputs."
                     ),
                     latency_ms=(time.perf_counter() - t0) * 1000.0
@@ -300,8 +305,18 @@ class UINavigator:
             sel_id = params.get("selector_id") or params.get("selector")
             btn = params.get("button", "left")
             clicks = params.get("clicks", 1)
+
+            win = self.input_controller.window_manager.current_window
+            frame = self.capture_manager.capture(window=win)
+
+            target_res = self.target_resolver.resolve_target(
+                frame=frame,
+                selector_id=sel_id,
+                dry_run=dry_run
+            )
+
             res = self.target_executor.click_and_verify(
-                target_resolution=None,
+                target_resolution=target_res,
                 button=btn,
                 clicks=clicks,
                 dry_run=dry_run

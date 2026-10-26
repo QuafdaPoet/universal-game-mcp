@@ -51,6 +51,10 @@ class TargetResolver:
         self.verifier = verifier
         self.skill_packs: Dict[str, Any] = skill_packs or {}
 
+    def register_skill_pack(self, game_id: str, pack: Any) -> None:
+        """Dynamically registers or updates a skill pack reference."""
+        self.skill_packs[game_id] = pack
+
     def resolve_target(
         self,
         frame: np.ndarray,
@@ -70,24 +74,43 @@ class TargetResolver:
         """
         is_dry_run = self.verifier.input_controller.is_dry_run_active(dry_run)
 
+        # Helper to extract attribute or dict key
+        def _get_val(obj: Any, key: str, default: Any = None) -> Any:
+            if hasattr(obj, key):
+                v = getattr(obj, key)
+                return v if v is not None else default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return default
+
         # Resolve selector definition from loaded skill packs if selector_id is provided
         if selector_id and self.skill_packs:
             for pack in self.skill_packs.values():
-                selectors_dict = getattr(pack, "selectors", {})
-                if selector_id in selectors_dict:
+                selectors_dict = _get_val(pack, "selectors", {})
+                if isinstance(selectors_dict, dict) and selector_id in selectors_dict:
                     sel = selectors_dict[selector_id]
-                    if not icon_name and getattr(sel, "template_file", None):
+                    if not icon_name and _get_val(sel, "template_file"):
                         icon_name = selector_id
-                    if not text_pattern and getattr(sel, "text_pattern", None):
-                        text_pattern = sel.text_pattern
-                    if not search_roi and getattr(sel, "search_roi", None):
-                        search_roi = sel.search_roi
-                    if getattr(sel, "threshold", None) is not None:
-                        threshold = sel.threshold
-                    if getattr(sel, "hover_verification", None):
-                        hover_verification = sel.hover_verification
-                    if getattr(sel, "expected_tooltip_contains", None):
-                        expected_tooltip = sel.expected_tooltip_contains
+                    if not text_pattern and _get_val(sel, "text_pattern"):
+                        text_pattern = _get_val(sel, "text_pattern")
+                    if not search_roi and _get_val(sel, "search_roi"):
+                        s_roi = _get_val(sel, "search_roi")
+                        if isinstance(s_roi, NormalizedRect):
+                            search_roi = s_roi
+                        elif isinstance(s_roi, dict):
+                            search_roi = NormalizedRect(
+                                float(s_roi.get("x", 0.0)),
+                                float(s_roi.get("y", 0.0)),
+                                float(s_roi.get("width", 1.0)),
+                                float(s_roi.get("height", 1.0))
+                            )
+                    sel_thresh = _get_val(sel, "threshold")
+                    if sel_thresh is not None:
+                        threshold = float(sel_thresh)
+                    if _get_val(sel, "hover_verification") is not None:
+                        hover_verification = bool(_get_val(sel, "hover_verification"))
+                    if _get_val(sel, "expected_tooltip_contains"):
+                        expected_tooltip = _get_val(sel, "expected_tooltip_contains")
                     break
         orig_h, orig_w = frame.shape[:2]
         candidates: List[TargetCandidate] = []
@@ -148,6 +171,27 @@ class TargetResolver:
 
         # Evaluate candidate findings
         if not candidates:
+            if is_dry_run and search_roi:
+                sim_cand = TargetCandidate(
+                    candidate_id=f"dry_run_{selector_id or 'sim'}",
+                    candidate_type="simulated",
+                    confidence=0.85,
+                    bbox_pixel=BoundingBox(int(search_roi.x * orig_w), int(search_roi.y * orig_h), int(search_roi.width * orig_w), int(search_roi.height * orig_h)),
+                    bbox_normalized=search_roi,
+                    center_normalized=search_roi.center,
+                    text=None,
+                    details={"simulated_dry_run": True}
+                )
+                return TargetResolution(
+                    status=TargetStatus.SUCCESS.value,
+                    selector_id=selector_id,
+                    target_candidate=sim_cand,
+                    all_candidates=[sim_cand],
+                    coordinates_normalized=sim_cand.center_normalized,
+                    evidence={"dry_run": True, "simulated": True},
+                    reason="Resolved simulated target candidate within search_roi during dry run."
+                )
+
             return TargetResolution(
                 status=TargetStatus.NOT_FOUND.value,
                 selector_id=selector_id,
