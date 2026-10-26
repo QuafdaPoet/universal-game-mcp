@@ -1,0 +1,34 @@
+{
+  "selector_id": "topbar_speed",
+  "name": "Game Speed Selector",
+  "description": "Locates the speed controls (levels 1-5 and +/- buttons) in the top-right",
+  "type": "composite",
+  "strategy": {
+    "primary": "template_match",
+    "secondary": "ocr_text"
+  },
+  "search_roi": {
+    "x": 0.92,
+    "y": 0.0,
+    "width": 0.08,
+    "height": 0.05
+  },
+  "template": {
+    "template_file": "templates/pause_btn.png",
+    "threshold": 0.70,
+    "multi_scale": true
+  },
+  "text_criteria": {
+    "pattern": "[+-]|Speed",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

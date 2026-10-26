@@ -1,0 +1,28 @@
+{
+  "skill_id": "inspect_army_orders",
+  "version": "1.0.0",
+  "name": "Inspect Army Battle Orders",
+  "description": "Inspects active frontline, offensive line, fallback, and garrison orders for selected army",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "selected_army"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.20,
+      "y": 0.85,
+      "width": 0.60,
+      "height": 0.12
+    },
+    "expected_text": "",
+    "timeout_ms": 1000
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "knowledge_id": "hoi4_knowledge_manifest",
+  "game_id": "hoi4",
+  "version": "1.5.0",
+  "supported_game_versions": ["1.14.*", "1.15.*", "1.16.*", "1.17.*", "1.18.*", "1.19.*"],
+  "tested_local_version": "Operation Postern v1.19.3.0.c01a",
+  "upstream_attribution": {
+    "source_project": "HOI4-Live-Tools",
+    "upstream_repo": "https://github.com/klimPaskov/HOI4-Live-Tools",
+    "upstream_commit": "6b91a2a43edfeab60a415ec2ddd9b71d215b8a56",
+    "license": "Apache-2.0"
+  },
+  "topics": [
+    "rules_and_modes",
+    "operating_loop",
+    "strategy_core",
+    "countries/germany_fair",
+    "countries/china_fair",
+    "countries/poland_meta"
+  ],
+  "disclaimer": "Strategic knowledge entries represent verified operational heuristics and campaign guidelines. They are not guaranteed optimal choices under all random AI variations. Strategy is cleanly decoupled from executable UI primitives."
+}

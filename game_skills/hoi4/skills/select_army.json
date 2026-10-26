@@ -1,0 +1,22 @@
+{
+  "skill_id": "select_army",
+  "version": "1.0.0",
+  "name": "Select Army Group",
+  "description": "Selects an army group card from the bottom ribbon to focus its divisions and battle plans",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "click_selector",
+      "params": {
+        "selector": "army_card"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "state_match",
+    "expected_state": "selected_army",
+    "timeout_ms": 1500
+  }
+}

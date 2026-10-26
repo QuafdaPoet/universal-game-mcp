@@ -1,0 +1,29 @@
+{
+  "skill_id": "close_dialog",
+  "version": "1.0.0",
+  "name": "Close Active Dialog or Panel",
+  "description": "Closes open drawers, focus trees, or dialogs by sending Escape key",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["escape"],
+        "duration_ms": 50
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.05,
+      "y": 0.10,
+      "width": 0.40,
+      "height": 0.80
+    },
+    "min_diff_ratio": 0.02,
+    "timeout_ms": 1000
+  }
+}

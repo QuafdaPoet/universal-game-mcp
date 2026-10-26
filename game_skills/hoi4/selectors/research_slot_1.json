@@ -1,0 +1,30 @@
+{
+  "selector_id": "research_slot_1",
+  "name": "First Research Slot",
+  "description": "Locates the first research slot box in the research panel",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.02,
+    "y": 0.12,
+    "width": 0.32,
+    "height": 0.14
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "Empty Research Slot|Select Research|Research Slot|Days Left",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

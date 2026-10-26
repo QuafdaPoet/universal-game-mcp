@@ -1,0 +1,29 @@
+{
+  "skill_id": "read_tooltip",
+  "version": "1.0.0",
+  "name": "Read UI Tooltip",
+  "description": "Hovers mouse cursor over targeted UI selector or coordinate and extracts tooltip text",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "hover_selector",
+      "params": {
+        "selector": "political_power",
+        "duration_ms": 300
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff",
+    "roi": {
+      "x": 0.0,
+      "y": 0.05,
+      "width": 0.40,
+      "height": 0.30
+    },
+    "min_diff_ratio": 0.01,
+    "timeout_ms": 1000
+  }
+}

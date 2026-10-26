@@ -1,0 +1,35 @@
+{
+  "skill_id": "inspect_construction_queue",
+  "version": "1.0.0",
+  "name": "Inspect Construction Queue",
+  "description": "Opens construction panel and lists civilian factory usage and ongoing infrastructure projects",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["t"],
+        "duration_ms": 60
+      }
+    },
+    {
+      "action": "verify_state",
+      "params": {
+        "expected_state": "construction"
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "ocr_text",
+    "roi": {
+      "x": 0.02,
+      "y": 0.12,
+      "width": 0.35,
+      "height": 0.70
+    },
+    "expected_text": "Construction",
+    "timeout_ms": 1500
+  }
+}

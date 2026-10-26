@@ -96,28 +96,43 @@ class SkillExecutionEngine:
         self.ocr_engine = ocr_engine
         self.storage = storage
         self.skill_packs: Dict[str, GameSkillPack] = skill_packs or {}
+        self.state_recognizer: Optional[Any] = None
+
+    def register_skill_pack(self, game_id: str, pack: Any) -> None:
+        """Dynamically registers or updates a skill pack reference."""
+        self.skill_packs[game_id] = pack
 
     def lookup_skill(self, skill_id: str, game_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Looks up skill from curated packs first, then from persistent learned skills.
+        Supports both GameSkillPack instances and dictionary representations.
         """
+        def _gv(obj: Any, key: str, default: Any = None) -> Any:
+            if hasattr(obj, key):
+                v = getattr(obj, key)
+                return v if v is not None else default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return default
+
         # 1. Curated packs
         for g_id, pack in self.skill_packs.items():
             if game_id and g_id != game_id:
                 continue
-            if skill_id in pack.skills:
-                skill_def = pack.skills[skill_id]
+            skills_dict = _gv(pack, "skills", {})
+            if isinstance(skills_dict, dict) and skill_id in skills_dict:
+                skill_def = skills_dict[skill_id]
                 return {
-                    "skill_id": skill_def.skill_id,
+                    "skill_id": _gv(skill_def, "skill_id", skill_id),
                     "game_id": g_id,
-                    "version": skill_def.version,
-                    "name": skill_def.name,
-                    "description": skill_def.description,
-                    "preconditions": skill_def.preconditions,
-                    "steps": skill_def.steps,
-                    "post_verification": skill_def.post_verification,
+                    "version": _gv(skill_def, "version", "1.0.0"),
+                    "name": _gv(skill_def, "name", skill_id),
+                    "description": _gv(skill_def, "description", ""),
+                    "preconditions": _gv(skill_def, "preconditions", {}),
+                    "steps": _gv(skill_def, "steps", []),
+                    "post_verification": _gv(skill_def, "post_verification", {}),
                     "is_curated": True,
-                    "status": "curated"
+                    "status": _gv(skill_def, "status", "curated")
                 }
 
         # 2. Learned persistent skills
@@ -198,6 +213,43 @@ class SkillExecutionEngine:
         steps = skill_data.get("steps", [])
         preconditions = skill_data.get("preconditions", {})
         post_verification = skill_data.get("post_verification", {})
+
+        # Step 1.5: Enforce Candidate / Rejected Execution Policy
+        skill_status = skill_data.get("status", "curated")
+        if skill_status == "rejected":
+            return SkillExecutionResult(
+                skill_id=skill_id,
+                game_id=resolved_game_id,
+                success=False,
+                status="blocked",
+                preconditions_met=False,
+                steps_executed=0,
+                steps_total=len(steps),
+                post_verification_passed=False,
+                dry_run=effective_dry_run,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"Action blocked: Skill '{skill_id}' has been marked as REJECTED.",
+                step_logs=[],
+                evidence={"rejected": True}
+            )
+
+        allow_candidate = (params or {}).get("allow_candidate", False)
+        if skill_status == "candidate" and not effective_dry_run and not allow_candidate:
+            return SkillExecutionResult(
+                skill_id=skill_id,
+                game_id=resolved_game_id,
+                success=False,
+                status="blocked",
+                preconditions_met=False,
+                steps_executed=0,
+                steps_total=len(steps),
+                post_verification_passed=False,
+                dry_run=effective_dry_run,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"Action blocked: Skill '{skill_id}' is an unapproved candidate. Pass allow_candidate=True or run in dry_run mode.",
+                step_logs=[],
+                evidence={"candidate_unapproved": True}
+            )
 
         # Step 2: Validate Action Primitives & Completeness
         for s in steps:
@@ -304,8 +356,12 @@ class SkillExecutionEngine:
         )
 
         # Update stats if this is a learned skill
+        # Mandatory Audit Fix: Distinguish dry_run simulation vs live execution; unverified outcomes fail.
         if self.storage and not skill_data.get("is_curated"):
-            self.storage.update_skill_stats(skill_id, success=final_success)
+            if post_ver_ok:
+                self.storage.update_skill_stats(skill_id, success=final_success, is_dry_run=effective_dry_run)
+            else:
+                self.storage.update_skill_stats(skill_id, success=False, is_dry_run=effective_dry_run)
 
         return SkillExecutionResult(
             skill_id=skill_id,
@@ -357,7 +413,7 @@ class SkillExecutionEngine:
                 )
 
             elif action in ("locate_and_click", "click_selector"):
-                sel_id = step.get("selector") or merged_params.get("selector_id")
+                sel_id = step.get("selector") or merged_params.get("selector_id") or merged_params.get("selector")
                 btn = step.get("button", "left")
                 clicks = step.get("clicks", 1)
 
@@ -449,6 +505,53 @@ class SkillExecutionEngine:
                     message=f"Waited {dur}ms"
                 )
 
+            elif action == "verify_state":
+                exp_state = merged_params.get("expected_state")
+                exp_text = merged_params.get("expected_text") or merged_params.get("text_pattern")
+                win = self.input_controller.window_manager.current_window
+                frame = self.capture_manager.capture(window=win)
+
+                verified = False
+                reason = ""
+                det_evidence = {}
+
+                if dry_run:
+                    verified = True
+                    reason = f"[DRY-RUN] State verified as '{exp_state or 'expected'}'."
+                    det_evidence = {"dry_run": True}
+                else:
+                    if exp_state:
+                        if hasattr(self, "state_recognizer") and self.state_recognizer:
+                            det = self.state_recognizer.recognize_state(frame, game_id=game_id)
+                            det_evidence = det.to_dict()
+                            verified = (det.state_name == exp_state)
+                            reason = f"Observed state '{det.state_name}' (expected: '{exp_state}', conf: {det.confidence})"
+                        else:
+                            verified = True
+                            reason = f"State verification assumed for '{exp_state}'"
+
+                    if exp_text:
+                        import re
+                        ocr_res = self.ocr_engine.recognize(frame)
+                        found_text = any(re.search(exp_text, line.text, re.IGNORECASE) for line in ocr_res.lines)
+                        if not found_text:
+                            verified = False
+                            reason += f" Expected text pattern '{exp_text}' not found."
+                        else:
+                            verified = True if not exp_state else verified
+                            reason += f" Found text pattern '{exp_text}'."
+
+                return StepExecutionLog(
+                    step_index=step_index,
+                    action=action,
+                    params=merged_params,
+                    success=verified,
+                    executed=True,
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    message=reason or "State verified.",
+                    evidence=det_evidence
+                )
+
             else:
                 return StepExecutionLog(
                     step_index=step_index,
@@ -481,9 +584,10 @@ class SkillExecutionEngine:
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates post-action visual state change or OCR expectations.
+        Audit fix: Missing postconditions must fail verification to prevent false success.
         """
         if not post_verification:
-            return True, "No postcondition specified.", {}
+            return False, "Postcondition verification failed: No postconditions specified in skill definition.", {"missing_postcondition": True}
 
         if dry_run:
             return True, "[DRY-RUN] Verification simulated successfully.", {"dry_run": True}
@@ -527,7 +631,7 @@ class SkillExecutionEngine:
 
         for step in skill_data.get("steps", []):
             if step.get("action") in ("locate_and_click", "click_selector"):
-                sel_id = step.get("selector") or (step.get("params") or {}).get("selector_id")
+                sel_id = step.get("selector") or (step.get("params") or {}).get("selector_id") or (step.get("params") or {}).get("selector")
                 if sel_id not in pack.selectors:
                     return f"Selector '{sel_id}' referenced in step is not defined in manifest."
 

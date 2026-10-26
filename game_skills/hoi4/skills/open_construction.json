@@ -1,0 +1,30 @@
+{
+  "skill_id": "open_construction",
+  "version": "1.0.0",
+  "name": "Open Construction Panel",
+  "description": "Opens national infrastructure and factory construction queue by pressing hotkey 't'",
+  "preconditions": {
+    "window_focused": true
+  },
+  "steps": [
+    {
+      "action": "press_keys",
+      "params": {
+        "keys": ["t"],
+        "duration_ms": 60
+      }
+    }
+  ],
+  "post_verification": {
+    "type": "visual_diff_and_ocr",
+    "roi": {
+      "x": 0.0,
+      "y": 0.08,
+      "width": 0.35,
+      "height": 0.85
+    },
+    "expected_text": "Construction",
+    "min_diff_ratio": 0.04,
+    "timeout_ms": 1500
+  }
+}

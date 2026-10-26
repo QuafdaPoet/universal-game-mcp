@@ -1,0 +1,42 @@
+{
+  "topic": "rules_and_modes",
+  "profile_revision": "campaign-house-2026-10-11",
+  "modes": {
+    "FAIR": {
+      "description": "Strong vanilla strategy under explicit house rules. Win decisively through normal player interface without game-mechanic exploits.",
+      "allowed": [
+        "Encirclements, pinning, and tactical overruns",
+        "Retreating to defense river and mountain lines",
+        "Concentrated armor and breakthrough exploitation",
+        "Air superiority, CAS support, and logistics strikes",
+        "Naval blockades, convoy raiding, and amphibious invasions",
+        "Efficient industrial construction and ahead-of-time technology planning",
+        "Designer and Military Industrial Organization (MIO) optimization",
+        "Lawful focus branch and diplomatic expansion"
+      ],
+      "banned_exploits": {
+        "bugs_and_caps": "No equipment duplication, free research loops, special forces cap bypass, or template-conversion stat laundering.",
+        "division_armor": "No line tank/SPG/TD mixed with leg infantry/cavalry solely to transfer armor stat (space marine ban). Keep foot defenders and mobile assault separate.",
+        "diplomacy": "No military-access order-66 betrayal, fake wars to manipulate world tension, faction hopping, or artificial civil war triggering.",
+        "economy": "No unneeded resource trading for factory gifting, lend-lease market duplication loops, or puppet release spam.",
+        "combat_farming": "No endless war farming, attack-cancel farming, or zero-cost template conversions to farm XP.",
+        "defeat_avoidance": "No deleting or converting encircled units to rescue equipment via UI loopholes. Relieve or accept the loss.",
+        "ai_manipulation": "No repeated empty-port invasion cycling to break AI front assignment."
+      }
+    },
+    "META": {
+      "description": "Lifts FAIR house bans for single-player campaign challenges. Permits powerful normal-UI mechanics. Never permits console cheats, file hacking, or memory injection.",
+      "principles": [
+        "Strong intended mechanics: snowballing focus paths, optimized width, concentrated firepower",
+        "Normal UI mechanics: armor-supported infantry, paratrooper port seizures, subject manpower extraction",
+        "Strict boundary: no console/debug commands, no save editing, no memory writes"
+      ]
+    }
+  },
+  "non_negotiable_boundary": [
+    "Normal difficulty, vanilla rules, historical AI by default",
+    "No console commands (debug/eval/fire_event) in campaign play",
+    "No save editing, no memory write injection, no hidden enemy information",
+    "Attached window validation and emergency stop killswitch strictly respected"
+  ]
+}

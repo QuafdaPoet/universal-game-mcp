@@ -1,0 +1,25 @@
+{
+  "topic": "operating_loop",
+  "operating_cadence": {
+    "peacetime": "Provide at least a month of planned routine. Wait for major events or monthly review. Research queue refills do not require human panic.",
+    "wartime": "Review daily risk in background. Run at highest stable speed (Speed 3-4 recommended for operations). Lower speed during contested landings or critical front collapses.",
+    "pausing_policy": "Observations and status checks do NOT pause time. Pause only for genuine branching player choices or bounded multi-step inputs, restoring time state immediately afterward."
+  },
+  "standing_plan_schema": {
+    "research": "Ordered eligible tech IDs with ahead-of-time policy and fallback tech",
+    "focus": "Ordered national focus tree branch sequence with prerequisite tracking",
+    "construction": "Building type, state/province ID, level count, and priority queue ordering",
+    "production": "Equipment variant, factory line allocation, minimum floor, deficit priorities",
+    "shortages": "Stockpile buffer targets, resource imports, conversion rules",
+    "military": "Explicit army IDs, operational frontline, breakthrough axis, reserves",
+    "events": "Pre-decided option mappings for known non-branching events; prompt player on critical branching crises"
+  },
+  "daily_priority_checklist": [
+    "1. Chronology and observation freshness check (ensure window attached)",
+    "2. Protect survival: collapsing frontline, imminent encirclement, threatened capital/sole port, fuel depletion",
+    "3. Execute routine event options; leave critical unknown political dilemmas for player",
+    "4. Refill empty research and focus slots; ensure factories are fully assigned",
+    "5. Repair equipment deficits and supply bottlenecks before spawning mass unequipped divisions",
+    "6. Check army orders and objective progress; trigger review if battle plan is bogged down"
+  ]
+}

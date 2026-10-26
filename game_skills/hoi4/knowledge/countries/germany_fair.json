@@ -1,0 +1,30 @@
+{
+  "topic": "country_germany",
+  "country_tag": "GER",
+  "profile": "FAIR",
+  "campaign_objective": "Historical diplomatic expansion (Anschluss, Sudetenland, Fate of Czechoslovakia), defeat Poland, Low Countries, and France, execute Operation Sea Lion against UK, defeat USSR (Operation Barbarossa), and secure peace conference.",
+  "phases": {
+    "phase_1_buildup_1936_1938": {
+      "focus_sequence": ["Rhineland", "Four Year Plan", "Autarky", "Hermann Göring Werke", "KdF-Wagen", "Extra Research Slot", "Anschluss"],
+      "industrial_policy": "Build civilian factories until early 1937, then pivot heavily to military factories, synthetic refineries, and rail infrastructure in high-infrastructure core states.",
+      "field_force": "Maintain required fielded division manpower to trigger Anschluss (550k) and Sudetenland (750k) on schedule."
+    },
+    "phase_2_diplomacy_and_poland_1939": {
+      "war_window": "FAIR window begins July 1939. Secure Danzig or War.",
+      "poland_campaign": "Double pincer from Pomerania and Silesia to encircle Warsaw. Keep western border (Siegfried Line) firmly garrisoned against France.",
+      "post_poland": "Redeploy assault panzer divisions west, build up air bases in western Germany."
+    },
+    "phase_3_fall_gelb_france_1940": {
+      "axis_of_advance": "Attack through the Low Countries (Netherlands, then Belgium) avoiding the Maginot Line.",
+      "spearhead": "Panzers punch through the Ardennes toward Sedan and the English Channel, cutting off Allied armies in Flanders. Capture Paris to capitulate France."
+    },
+    "phase_4_sea_lion_and_uk": {
+      "prerequisites": "Air superiority over the English Channel/Southern England, concentrated naval bombers, fleet escort patrol, 10 marine/infantry landing divisions.",
+      "execution": "Land near Dover/Portsmouth, capture port, quickly ferry follow-on panzer corps, drive north to capitulate the United Kingdom."
+    },
+    "phase_5_barbarossa_ussr": {
+      "frontline": "Organize 3 Army Groups (North: Leningrad; Center: Moscow/Smolensk; South: Ukraine/Caucasus).",
+      "operational_art": "Prioritize massive frontier encirclements around Bialystok, Minsk, and Kiev. Follow railway lines to keep supply hubs online."
+    }
+  }
+}

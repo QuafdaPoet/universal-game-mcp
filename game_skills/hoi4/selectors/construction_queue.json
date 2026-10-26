@@ -1,0 +1,30 @@
+{
+  "selector_id": "construction_queue",
+  "name": "Construction Project Queue",
+  "description": "Locates the construction queue projects and factory assignment rows in the construction drawer",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.02,
+    "y": 0.18,
+    "width": 0.35,
+    "height": 0.65
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "Civilian Factory|Military Factory|Infrastructure|Dockyard|Refinery",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": false,
+    "duration_ms": 0,
+    "expected_tooltip_contains": null
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}

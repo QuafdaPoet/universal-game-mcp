@@ -1,0 +1,39 @@
+{
+  "topic": "strategy_core",
+  "economy_and_industry": {
+    "civilian_vs_military_deadline": "Civilian factories compound only if the nation survives until their payback date (~2.5 to 3 years). Germany can build civilians early (1936-mid 1937); China/Poland facing early existential war must prioritize military factories and supply immediately.",
+    "infrastructure_calculation": "Do not max infrastructure everywhere blindly. Upgrade infrastructure only in states where it accelerates multiple factory builds or resolves critical resource choke-points.",
+    "supply_hubs_and_rail": "Prioritize bottleneck rail and port repairs over marginal new factories during active warfare. Build new hubs only when motorization and transport planes cannot bridge the gap."
+  },
+  "research_and_focus": {
+    "principles": "Research industrial efficiency, electronics/computing, and equipment entering actual assembly lines. Avoid researching every tank/plane hull prematurely if factories cannot produce them.",
+    "doctrines": "Commit to doctrines that match your industrial and manpower base (Mobile Warfare for motorized/tanks; Superior Firepower for artillery/air; Grand Battleplan for planning bonus defense; Mass Assault for deep recovery)."
+  },
+  "production_and_shortages": {
+    "line_stability": "Maintain high production efficiency. Do not switch equipment variants every month unless the stat improvement exceeds the conversion penalty.",
+    "stockpile_coverage": "Days of coverage = usable stock / abs(daily deficit). Critical if below 7 days, warning below 30 days.",
+    "repair_order": [
+      "1. Stop wasteful attacks and unnecessary unit exercise; prioritize reinforcement over green recruitment.",
+      "2. Import essential missing resources (Rubber, Oil, Tungsten, Steel).",
+      "3. Reassign idle factories to highest deficit core equipment (Infantry Equipment, Support Equipment, Artillery).",
+      "4. Simplify division templates if material deficit cannot be closed."
+    ]
+  },
+  "force_architecture": {
+    "roles": {
+      "line_holders": "High organization, defense, and HP infantry. Economical equipment cost.",
+      "assault_strike": "Concentrated armor + motorized/mechanized. High breakthrough, soft/hard attack, hardness, and speed.",
+      "exploitation": "Cavalry / motorized divisions for rapid encirclement closure.",
+      "coast_guards": "Small garrison divisions with engineers stationed on ports and adjacent coastal tiles."
+    },
+    "template_widths": "Match target terrain combat widths (Forest 60/30, Plains 70/35, Hills 80/40, Mountains 50/25). Avoid single rigid width dogma."
+  },
+  "land_operations": {
+    "principles": [
+      "1. Define a clear axis: secure a supply hub, port, river crossing, or pocket.",
+      "2. Concentrate air superiority and CAS over the breakthrough sector.",
+      "3. Attack on narrow frontages; pin adjacent enemy divisions to prevent reinforcement.",
+      "4. Infantry follows immediately to consolidate the corridor; mobile spearheads do not outrun fuel or risk counter-encirclement."
+    ]
+  }
+}

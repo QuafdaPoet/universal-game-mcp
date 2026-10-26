@@ -39,18 +39,26 @@ class GameAssetIndexer:
     def index_game_directory(
         self,
         game_id: str,
-        game_path: str
+        game_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Scans interface/*.gui, interface/*.gfx, and localisation/*.yml in game_path.
         Extracts sprite names, window IDs, and localization entries into local cache.
+        If game_path is omitted, auto-discovers installation via HOI4EnvironmentDetector.
         """
-        if not os.path.exists(game_path):
+        if not game_path:
+            from ..adapters.hoi4.environment import HOI4EnvironmentDetector
+            detector = HOI4EnvironmentDetector()
+            installs = detector.discover_installations()
+            if installs:
+                game_path = installs[0].get("install_dir")
+
+        if not game_path or not os.path.exists(game_path):
             return {
                 "success": False,
                 "game_id": game_id,
-                "game_path": game_path,
-                "message": f"Game directory does not exist: {game_path}"
+                "game_path": game_path or "unspecified",
+                "message": f"Game directory does not exist or was not discovered: {game_path}"
             }
 
         sprites: Dict[str, str] = {}

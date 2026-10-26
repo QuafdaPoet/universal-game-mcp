@@ -1,89 +1,137 @@
-# Hướng Dẫn Chi Tiết Game Skill Pack: Hearts of Iron IV (HOI4) - V1.5
+# Hướng Dẫn Tích Hợp Hearts of Iron IV (HOI4) - Universal Game MCP V1.5
 
-Trong kiến trúc Universal Game MCP V1.5, **Hearts of Iron IV** được triển khai dưới dạng **Game Skill Pack** độc lập tại thư mục `game_skills/hoi4/`, kết hợp cùng bộ máy nhận diện trạng thái UI, đồ thị điều hướng và bộ máy tự học.
+Tài liệu này cung cấp hướng dẫn đầy đủ về bộ tích hợp prebuilt dành cho **Hearts of Iron IV (HOI4)** trên nền tảng **Universal Game MCP (UGM) V1.5**.
 
----
-
-## 🗺️ Bản Đồ Vùng Giao Diện (Normalized UI Regions)
-
-Tất cả các vùng tọa độ được chuẩn hóa tỉ lệ `[0.0, 1.0]` tương thích với mọi độ phân giải tỷ lệ 16:9 (1080p, 1440p, 4K):
-
-| Tên vùng | Tọa độ chuẩn hóa `[x, y, w, h]` | Ý nghĩa trong game HOI4 |
-|---|---|---|
-| `topbar` | `[0.0, 0.0, 1.0, 0.05]` | Toàn bộ thanh tài nguyên và chỉ số quốc gia phía trên |
-| `political_power` | `[0.040, 0.0, 0.055, 0.04]` | Chỉ số Điểm Chính Trị (Political Power) |
-| `stability` | `[0.095, 0.0, 0.055, 0.04]` | Chỉ số Độ Ổn Định Quốc Gia (Stability) |
-| `war_support` | `[0.150, 0.0, 0.055, 0.04]` | Chỉ số Ủng Hộ Chiến Tranh (War Support) |
-| `manpower` | `[0.205, 0.0, 0.070, 0.04]` | Nhân Lực Quân Sự Hiện Có (Manpower) |
-| `factories` | `[0.275, 0.0, 0.065, 0.04]` | Số lượng nhà máy dân sự & quân sự (Factories) |
-| `convoys` | `[0.340, 0.0, 0.060, 0.04]` | Đoàn tàu vận tải biển (Convoys) |
-| `command_power` | `[0.400, 0.0, 0.060, 0.04]` | Điểm Mệnh Lệnh Quân Sự (Command Power) |
-| `date_clock` | `[0.830, 0.0, 0.100, 0.045]` | Ngày tháng và đồng hồ thời gian |
-| `speed_controls` | `[0.930, 0.0, 0.070, 0.045]` | Nút tăng giảm tốc độ thời gian (1x - 5x) |
-| `pause_indicator`| `[0.850, 0.045, 0.080, 0.035]` | Biển báo trạng thái tạm dừng (PAUSED) màu đỏ |
-| `drawer_panel` | `[0.0, 0.05, 0.35, 0.95]` | Ngăn kéo các bảng (Sản xuất, Nghiên cứu, Ngoại giao) |
+Hệ thống cho phép các mô hình AI (Claude, Gemini, GPT) quan sát, phân tích chiến lược, điều hướng giao diện và thực thi hành động trong HOI4 hoàn toàn tự động, an toàn và ngoại tuyến.
 
 ---
 
-## 🎯 Trạng Thái Giao Diện (UI States) Trong HOI4
+## 1. Kiến Trúc Tích Hợp
 
-Bộ nhận diện `UIStateRecognizer` tự động phân loại giao diện HOI4 thành các trạng thái:
-1. `main_map`: Bản đồ chính (thanh topbar hiển thị đầy đủ, không có ngăn kéo mở).
-2. `production`: Bảng quản lý dây chuyền sản xuất quân sự và xưởng đóng tàu (phím tắt `y`).
-3. `construction`: Bảng xây dựng công trình, hạ tầng, nhà máy (phím tắt `t`).
-4. `research`: Bảng cây công nghệ và nghiên cứu khoa học (phím tắt `w`).
-5. `diplomacy`: Bảng danh sách quốc gia và ngoại giao (phím tắt `e`).
-6. `recruitment`: Bảng huấn luyện và biên chế sư đoàn (phím tắt `u`).
-7. `army_selected`: Khi một tập đoàn quân / tướng lĩnh được chọn (thanh chân dung tướng ở đáy màn hình).
-8. `unknown`: Giao diện chưa nhận dạng được hoặc màn hình tải / menu chính.
-
-Mỗi kết quả đều có độ tin cậy `confidence`, băm tri giác `phash`, bằng chứng quan sát `evidence` và trạng thái `known` / `ambiguous` / `unknown`.
-
----
-
-## 🧭 Đồ Thị Dẫn Đường (Navigation Graph) HOI4
-
-Đồ thị dẫn đường cho phép AI di chuyển giữa các trạng thái giao diện mà không cần click mò:
-
-```mermaid
-flowchart TD
-    main_map["main_map (Bản đồ chính)"]
-    prod["production (Bảng sản xuất)"]
-    cons["construction (Bảng xây dựng)"]
-    res["research (Bảng nghiên cứu)"]
-    diplo["diplomacy (Bảng ngoại giao)"]
-
-    main_map -->|"press_keys ['y']"| prod
-    prod -->|"press_keys ['escape']"| main_map
-    main_map -->|"press_keys ['t']"| cons
-    cons -->|"press_keys ['escape']"| main_map
-    main_map -->|"press_keys ['w']"| res
-    res -->|"press_keys ['escape']"| main_map
-    main_map -->|"press_keys ['e']"| diplo
-    diplo -->|"press_keys ['escape']"| main_map
+```
+                                +-----------------------------+
+                                |      AI Client / Agent      |
+                                +--------------+--------------+
+                                               |
+                                     (JSON-RPC MCP Tools)
+                                               v
++-----------------------------------------------------------------------------------------+
+|                               Universal Game MCP Server                                 |
+|                                                                                         |
+|  +--------------------+   +-----------------------+   +------------------------------+  |
+|  | HOI4 Knowledge     |   | HOI4 Perception Engine|   | 12-State Navigation Graph    |  |
+|  | - Rules & Modes    |   | - Differential Tooltip|   | - main_menu -> start_game    |  |
+|  | - Operating Loop   |   | - Paper Mask Popups   |   | - main_map <-> panels        |  |
+|  | - Strategy Core    |   | - Resilient Date OCR  |   | - Dijkstra Shortest Path     |  |
+|  | - Country Playbooks|   | - Hazard Pause/Speed  |   | - Verified State Transitions |  |
+|  +--------------------+   +-----------------------+   +------------------------------+  |
+|                                                                                         |
+|  +-----------------------------------------------------------------------------------+  |
+|  |                   Prebuilt Game Skill Pack (game_skills/hoi4/)                    |  |
+|  |   15 Selectors (Visual/OCR) | 25 Verified Skills (Tier A, Tier B, Tier C)          |  |
+|  +-----------------------------------------------------------------------------------+  |
++-----------------------------------------------------------------------------------------+
+                                               |
+                          (DirectInput / BetterCam / RapidOCR)
+                                               v
+                                +-----------------------------+
+                                |   Hearts of Iron IV (Game)  |
+                                +-----------------------------+
 ```
 
-AI gọi `navigate_to(target_state="production", game_id="hoi4")` để tự động thực thi chuyển đổi an toàn và xác minh kết quả sau thao tác.
+---
+
+## 2. 12 Trạng Thái Giao Diện (Observable UI States)
+
+Hệ thống nhận diện tự động `UIStateRecognizer` hỗ trợ 12 trạng thái tiêu chuẩn:
+
+| Trạng thái | Tên hiển thị | Cơ chế nhận dạng chính | Phím chuyển đổi |
+|---|---|---|---|
+| `main_menu` | Main Menu | OCR phát hiện "Single Player", "Multiplayer", "Options", không có topbar | Click "Single Player" |
+| `country_selection` | Country Selection | OCR phát hiện "Select Country", "1936", "Gathering Storm" | Click "Start" |
+| `main_map` | Main Map | Topbar hiển thị đầy đủ tài nguyên, không có ngăn kéo/popup đè | Trạng thái gốc |
+| `politics` | Politics Panel | Ngăn kéo chứa "Laws & Government", "Political Parties", "Ruling Party" | `Shift + Q` / `Escape` |
+| `national_focus` | Focus Tree | Khung cây tiêu điểm toàn màn hình chứa "National Focus Tree" | Click slot / `Escape` |
+| `production` | Production | Ngăn kéo chứa "Military Factories", "Dockyards", dây chuyền sản xuất | `Y` / `Escape` |
+| `construction` | Construction | Ngăn kéo chứa "Civilian Factories", "Infrastructure", hàng đợi xây | `T` / `Escape` |
+| `research` | Research | Ngăn kéo chứa các ô nghiên cứu "Research Slot", cây công nghệ | `W` / `Escape` |
+| `diplomacy` | Diplomacy | Ngăn kéo chứa "World Tension", danh sách quốc gia, liên minh | `E` / `Escape` |
+| `recruitment` | Recruitment | Ngăn kéo chứa "Division Designer", danh sách huấn luyện quân | `U` / `Escape` |
+| `selected_army` | Selected Army | Thanh quân đoàn ở đáy màn hình có tướng/sư đoàn được chọn | Click quân đoàn / `Escape` |
+| `event_popup` | Event Popup | Phân đoạn mặt nạ giấy (parchment/news) hoặc hộp thoại sự kiện | Click nút / `Enter` |
 
 ---
 
-## 🎮 Các Kỹ Năng Tuyển Chọn (Curated Game Skills)
+## 3. Danh Mục Kỹ Năng (Game Skill Pack - 25 Skills)
 
-Thư mục `game_skills/hoi4/skills/` cung cấp các kỹ năng tuyển chọn có sẵn:
-1. `pause_unpause`: Gửi phím cách (`space`) để tạm dừng / tiếp tục mô phỏng; xác minh sự xuất hiện/biến mất của biển báo `PAUSED`.
-2. `open_production`: Nhấn phím `y` để mở bảng sản xuất; xác minh bằng OCR từ khóa `"Production"`.
-3. `increase_speed`: Nhấn phím `num+` để tăng tốc độ game; xác minh thay đổi chỉ số tốc độ.
-4. `select_army_group`: Định vị chân dung chỉ huy tập đoàn quân và click chọn; xác minh vùng thanh quân sự phía dưới.
+### Nhóm Kỹ Năng Cốt Lõi (Tier A - Essential)
+- `pause_unpause`: Tạm dừng hoặc tiếp tục mô phỏng (Phím cách).
+- `set_speed`: Thiết lập tốc độ game từ 1 đến 5.
+- `decrease_speed` / `increase_speed`: Giảm/Tăng tốc độ game (`num-` / `num+`).
+- `close_dialog`: Đóng ngăn kéo, menu hoặc popup đang mở (`Escape`).
+- `open_production` / `open_research` / `open_construction` / `open_politics`: Mở các bảng chức năng tương ứng.
+- `open_national_focus`: Mở cây tiêu điểm quốc gia 70 ngày.
+- `read_topbar`: Đọc tài nguyên, nhân lực, nhà máy, độ ổn định và ngày giờ.
+- `read_tooltip`: Rê chuột qua phần tử UI và đọc tooltip giải thích.
 
-> [!IMPORTANT]
-> Các kỹ năng tuyển chọn này được bảo vệ nguyên vẹn (Curated Protection). Khi AI phát hiện thao tác mới, hệ thống sẽ lưu vào bộ nhớ bền vững dưới dạng kỹ năng ứng viên (`candidate`), không bao giờ ghi đè trực tiếp lên các tệp trong `game_skills/`.
+### Nhóm Kỹ Năng Kinh Tế & Nghiên Cứu (Tier B - Economy & State)
+- `inspect_research_slots`: Quét danh sách các ô nghiên cứu và tiến độ hiện tại.
+- `start_research`: Chọn một ô nghiên cứu trống để bắt đầu đề tài mới.
+- `inspect_national_focus`: Kiểm tra tiêu điểm quốc gia đang chạy và nhánh kế tiếp.
+- `select_national_focus`: Bấm chọn tiêu điểm mới trên cây focus.
+- `inspect_production_lines`: Đọc sản lượng súng, pháo, xe tăng, máy bay và hiệu suất dây chuyền.
+- `adjust_factory_allocation`: Tăng/giảm số nhà máy quân sự gán cho dây chuyền.
+- `inspect_construction_queue`: Quét hàng đợi xây dựng nhà máy dân sự và cơ sở hạ tầng.
+- `queue_construction`: Đặt thêm công trình vào hàng đợi xây dựng.
+
+### Nhóm Kỹ Năng Quân Sự (Tier C - Military)
+- `list_visible_armies`: Quét danh sách tập đoàn quân và số lượng sư đoàn.
+- `select_army`: Bấm chọn thẻ tập đoàn quân trên thanh chỉ huy.
+- `assign_commander`: Bấm chọn chân dung tướng lĩnh hoặc thống chế.
+- `inspect_army_orders`: Kiểm tra kế hoạch tác chiến (mặt trận, tiến công, phòng ngự, đồn trú).
 
 ---
 
-## 💻 Trích Xuất Tài Nguyên Game (Game Asset Indexer)
+## 4. Kho Tri Thức Chiến Lược (On-Demand Knowledge Base)
 
-UGM V1.5 tích hợp công cụ `index_game_assets` giúp đọc trực tiếp các tệp `.gui`, `.gfx`, `.yml` từ thư mục cài đặt Hearts of Iron IV của người dùng:
-- Trích xuất tên các sprite giao diện (`spriteType`).
-- Trích xuất cấu trúc cửa sổ giao diện (`windowType`).
-- Trích xuất từ khóa bản địa hóa (localization keys).
-- **Hoàn toàn an toàn**: Chỉ đọc (read-only), không sửa file, không can thiệp bộ nhớ tiến trình game.
+Tri thức chiến lược được phân tách hoàn toàn khỏi các lệnh bấm chuột, lưu trữ dạng JSON tại `game_skills/hoi4/knowledge/` và truy xuất qua công cụ `hoi4_get_knowledge(topic, subtopic)`:
+
+1. **`rules_and_modes`**: Định nghĩa luật chơi công bằng (FAIR - cấm space marine, cấm bug lặp đồ, cấm order-66 phản bội) và META.
+2. **`operating_loop`**: Chu kỳ vận hành tiêu chuẩn (thời bình kiểm tra hàng tháng, thời chiến kiểm tra hàng ngày; chỉ dừng game khi có quyết định phân nhánh).
+3. **`strategy_core`**:
+   - *Chu kỳ hoàn vốn công nghiệp:* Nhà máy dân sự cần 2.5 - 3 năm mới hoàn vốn. Đức có thể xây dân sự sớm (1936-1937); Trung Quốc/Ba Lan đối mặt chiến tranh sớm phải dồn nhà máy quân sự ngay.
+   - *Thứ tự sửa chữa thiếu hụt:* 1. Dừng tấn công lãng phí; 2. Nhập khẩu tài nguyên thiếu; 3. Dồn nhà máy vào súng/pháo cốt lõi; 4. Đơn giản hóa bảng sư đoàn.
+4. **Cẩm Nang Quốc Gia (`country`)**:
+   - `germany_fair`: Lộ trình 5 giai đoạn, Anschluss, Danzig, Fall Gelb, Sư tử biển, Barbarossa.
+   - `china_fair`: Chiến lược phòng thủ chiều sâu (Sông Vàng, Sông Dương Tử), thống nhất quân phiệt, phòng thủ bờ biển.
+   - `poland_meta`: Liên minh quân chủ Baltic, chốt chặn cầu Romania (Romanian bridgehead), bao vây cơ động kỵ binh.
+
+---
+
+## 5. Danh Sách Công Cụ MCP Dành Riêng Cho HOI4
+
+| Tên Công Cụ | Tham Số | Chức Năng |
+|---|---|---|
+| `hoi4_get_knowledge` | `topic`, `subtopic` | Tải tri thức chiến lược theo chủ đề (`meta`, `rules_and_modes`, `operating_loop`, `strategy_core`, `country`). |
+| `hoi4_detect_environment` | `custom_game_path` | Tự động phát hiện thư mục cài đặt Steam, trạng thái tiến trình `hoi4.exe`, và engine OCR sẵn sàng. |
+| `hoi4_read_topbar` | `detailed` | OCR tài nguyên topbar; bóc tách ngày giờ, trạng thái pause và tốc độ game khi `detailed=True`. |
+| `hoi4_read_tooltip` | `target`, `x`, `y` | Rê chuột và phát hiện hộp tooltip vi phân, đọc nội dung bằng OCR. |
+| `hoi4_detect_popups` | *(không có)* | Quét cửa sổ sự kiện hoặc tin tức dạng giấy báo, trả về tọa độ và các nút lựa chọn. |
+| `index_game_assets` | `game_path`, `game_id` | Tự động quét file `.gui`, `.gfx`, `.yml` của game vào cache nội bộ (hoàn toàn read-only). |
+
+---
+
+## 6. Lệnh Kiểm Thử Toàn Diện (Pytest)
+
+Tất cả các tính năng đều có bài kiểm thử tự động ngoại tuyến (không cần mở game thật):
+
+```powershell
+# Chạy toàn bộ 137 bài kiểm thử của dự án
+uv run pytest -v
+
+# Chỉ chạy bài kiểm thử tích hợp HOI4
+uv run pytest tests/test_hoi4_prebuilt_integration.py -v
+
+# Chỉ chạy bài kiểm thử chống hồi quy của V1.5
+uv run pytest tests/test_v15_audit_regressions.py -v
+```

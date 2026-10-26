@@ -1,0 +1,12 @@
+{
+  "topic": "country_china",
+  "country_tag": "CHI",
+  "profile": "FAIR",
+  "campaign_objective": "Contain the Japanese invasion (Marco Polo Bridge Incident), preserve industrial core, unify warlords through national focus or subjugation, push Japanese forces out of mainland Asia, and reclaim Manchuria and Korea.",
+  "strategic_priorities": {
+    "defense_in_depth": "Do not fight in the open plains of Hebei where Japanese armor and air dominates. Fall back to the Yellow River and Yangtze River lines with entrenched infantry.",
+    "economy_and_equipment": "Extreme shortage of rifles and artillery. Build military factories in inland mountains (Sichuan, Yunnan). Prioritize basic infantry equipment production. Avoid expensive mechanized or tank research.",
+    "warlord_integration": "Focus tree 'Subjugate the Warlords' or United Front diplomacy. Puppet or annex Shanxi, Guangxi, and Yunnan to secure manpower and steel/tungsten resources.",
+    "coastal_defense": "Station dedicated port-guard garrisons on every single port from Qingdao to Guangzhou to defeat Japanese naval invasions on the beaches before they disembark."
+  }
+}

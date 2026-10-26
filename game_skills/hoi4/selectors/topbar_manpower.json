@@ -1,0 +1,30 @@
+{
+  "selector_id": "topbar_manpower",
+  "name": "Manpower Reserve Counter",
+  "description": "Locates the available military manpower count on the topbar",
+  "type": "text",
+  "strategy": {
+    "primary": "ocr_text",
+    "secondary": null
+  },
+  "search_roi": {
+    "x": 0.20,
+    "y": 0.0,
+    "width": 0.08,
+    "height": 0.045
+  },
+  "template": null,
+  "text_criteria": {
+    "pattern": "\\d+(\\.\\d+)?[KM]?",
+    "case_sensitive": false
+  },
+  "hover_verification": {
+    "enabled": true,
+    "duration_ms": 200,
+    "expected_tooltip_contains": "Manpower"
+  },
+  "ambiguity_handling": {
+    "strategy": "highest_confidence",
+    "score_tolerance": 0.10
+  }
+}
