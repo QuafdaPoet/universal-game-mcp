@@ -1,0 +1,11 @@
+{
+  "topic": "country_poland",
+  "country_tag": "POL",
+  "profile": "META",
+  "campaign_objective": "Survive the two-front German and Soviet existential threat, leverage powerful monarchist or Baltic alliance focus paths, defend core river lines (Vistula and Romanian Bridgehead), and counter-attack to conquer Berlin and Moscow.",
+  "meta_mechanics": {
+    "focus_options": "Monarchist paths (Kingdom of Poland / Polish-Lithuanian Commonwealth) grant huge core territory, population, and industry across the Baltic and Belarus.",
+    "romanian_bridgehead": "Dense fort line anchored on the Dniester River and Carpathian mountains, keeping supply route to Allied trade open via the Black Sea.",
+    "cavalry_and_mobile_encirclements": "Cavalry with high speed and support artillery to slip through gaps in advancing German lines and sever East Prussia and Silesia supply rails."
+  }
+}

@@ -14,6 +14,15 @@ import cv2
 from ..base import BaseGameAdapter
 from ...core.types import NormalizedRect, OCRResult
 from ...core.ocr import BaseOCREngine
+from .knowledge import HOI4KnowledgeManager
+from .perception import (
+    parse_hoi4_date,
+    detect_pause_state,
+    detect_speed_level,
+    detect_tooltip_box,
+    detect_popups
+)
+from .environment import HOI4EnvironmentDetector
 
 logger = logging.getLogger("ugm.adapter.hoi4")
 
@@ -22,7 +31,12 @@ class HOI4Adapter(BaseGameAdapter):
     """
     Hearts of Iron IV adapter plugin.
     Maps topbar statistics, speed controls, production queues, and DirectInput hotkeys.
+    Provides prebuilt campaign knowledge, advanced perception, and environment discovery.
     """
+
+    def __init__(self, knowledge_dir: Optional[str] = None):
+        self.knowledge_manager = HOI4KnowledgeManager(knowledge_dir)
+        self.env_detector = HOI4EnvironmentDetector()
 
     @property
     def game_id(self) -> str:
@@ -116,10 +130,12 @@ class HOI4Adapter(BaseGameAdapter):
     def parse_topbar(
         self,
         ocr_engine: BaseOCREngine,
-        frame: np.ndarray
+        frame: np.ndarray,
+        detailed: bool = True
     ) -> Dict[str, Any]:
         """
         Performs event-driven OCR on the topbar regions to extract key national metrics.
+        Optionally extracts date, pause status, and simulation speed.
         """
         regions = self.get_ui_regions()
         metrics: Dict[str, Any] = {}
@@ -133,4 +149,63 @@ class HOI4Adapter(BaseGameAdapter):
                 "items": [i.to_dict() for i in res.items]
             }
 
+        if detailed:
+            # Date & Clock parsing
+            date_roi = regions.get("date_clock")
+            if date_roi:
+                date_res = ocr_engine.read_text(frame, roi=date_roi, event_tag="hoi4_topbar_date")
+                parsed_date = parse_hoi4_date(date_res.full_text)
+                metrics["date"] = {
+                    "raw_text": date_res.full_text,
+                    "parsed": parsed_date,
+                    "confidence": max([i.confidence for i in date_res.items], default=0.0)
+                }
+
+            # Pause state detection
+            pause_state, pause_details = detect_pause_state(frame)
+            metrics["pause"] = {
+                "state": pause_state,
+                "details": pause_details
+            }
+
+            # Speed level detection
+            metrics["speed"] = {
+                "level": detect_speed_level(frame)
+            }
+
         return metrics
+
+    def get_knowledge(self, topic: str, subtopic: Optional[str] = None) -> Dict[str, Any]:
+        """Loads prebuilt campaign or country strategy on-demand."""
+        return self.knowledge_manager.get_knowledge(topic, subtopic)
+
+    def detect_environment(self, custom_game_path: Optional[str] = None) -> Dict[str, Any]:
+        """Discovers local HOI4 installation, process status, and OCR readiness."""
+        return self.env_detector.detect(custom_game_path)
+
+    def parse_date(self, text: str) -> Optional[Dict[str, Any]]:
+        """Parses in-game date strings (e.g. '12:00, 1 Jan, 1936')."""
+        return parse_hoi4_date(text)
+
+    def detect_pause(self, frame: np.ndarray, scale: float = 1.0) -> Tuple[str, Dict[str, Any]]:
+        """Detects whether game is paused via red hazard stripe detection."""
+        return detect_pause_state(frame, scale=scale)
+
+    def detect_speed(self, frame: np.ndarray, scale: float = 1.0) -> Optional[int]:
+        """Detects current simulation speed (1-5)."""
+        return detect_speed_level(frame, scale=scale)
+
+    def detect_tooltip(
+        self,
+        before_frame: np.ndarray,
+        after_frame: np.ndarray,
+        cursor_xy: Tuple[int, int] = (960, 540),
+        max_dist: int = 700,
+        min_area: int = 1200
+    ) -> Optional[List[int]]:
+        """Detects tooltip bounding box from before-and-after visual differential."""
+        return detect_tooltip_box(before_frame, after_frame, cursor_xy=cursor_xy, max_dist=max_dist, min_area=min_area)
+
+    def detect_popups(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """Detects paper mask modal dialogs or news popups."""
+        return detect_popups(frame)
