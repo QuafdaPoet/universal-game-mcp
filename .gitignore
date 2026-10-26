@@ -1,0 +1,51 @@
+# Python virtual environments & bytecode
+.venv/
+env/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Build & packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Dataset & Training Samples (Opt-in data strictly excluded from Git)
+data/samples/
+data/
+*.png
+*.jpg
+*.jpeg
+!tests/fixtures/*.png
+!tests/fixtures/icons/*.png
+!ugm/adapters/hoi4/icons/*.png
+
+# Logs, scratch & local artifacts
+*.log
+.system_generated/
+scratch/
+.idea/
+.vscode/
+*.local
+
+# OS Generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Secrets & environment
+.env
+.env.*
+*.pem
+*.key

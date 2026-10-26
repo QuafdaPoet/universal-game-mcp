@@ -1,0 +1,16 @@
+# Pinned dependencies for Universal Game MCP (UGM)
+# Tested on Windows 10/11 x64, AMD Ryzen 5 5500U, Python 3.12
+mcp==2.3.0
+bettercam==1.0.0
+opencv-python==5.0.0.93
+pillow==13.0.0
+pydirectinput==1.0.4
+pywin32==312
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.31.0
+mss==10.2.0
+psutil==7.2.2
+
+# Testing & Development
+pytest==9.1.1
+pytest-asyncio==1.4.1
