@@ -76,15 +76,27 @@ Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64, inte
 
 ### Core V1.5 Subsystems
 1. **Persistent Memory (`ugm.memory`)**: SQLite with WAL mode, schema version tracking, perceptual hash matching (dHash), bounded storage pruning, and source attribution (`live` vs `synthetic_fixture`).
-2. **UI State Recognizer (`ugm.navigation.recognizer`)**: Multi-signal classifier combining perceptual hashing, event OCR, panel geometry, and confidence scoring (`known`, `ambiguous`, `unknown`).
+2. **UI State Recognizer (`ugm.navigation.recognizer`)**: Multi-signal classifier combining perceptual hashing, event OCR, panel geometry, and confidence scoring across 12 recognized states (`main_menu`, `country_selection`, `main_map`, `politics`, `research`, `production`, `construction`, `national_focus`, `diplomacy`, `recruitment`, `selected_army`, `event_popup`).
 3. **Navigation Graph (`ugm.navigation.graph`, `ugm.navigation.navigator`)**: Directed graph where nodes are UI states and edges are verified executable actions. Plans lowest-cost routes via Dijkstra, verifies state after each step, and replans or halts on mismatch.
-4. **Verified Self-Learning (`ugm.skills.learner`)**: Procedural learning pipeline: **Observe → Identify → Plan → Act → Verify → Learn → Reuse**. Candidate skills undergo validation track records before promotion to verified skills. Curated skills are strictly protected.
-5. **Skill Execution Engine (`ugm.skills.engine`)**: Runtime executor with allowlisted primitives (`press_keys`, `click_target`, `locate_and_click`, `click_selector`, `hover`, `wait`, `verify_state`), precondition checks, postcondition verification, and emergency stop killswitch.
-6. **Local Game Asset Indexer (`ugm.assets.indexer`)**: Read-only parser for installed HOI4 `.gui`, `.gfx`, and `.yml` files into local caches without modifying game files or process memory.
+4. **Prebuilt HOI4 Game Skill Pack (`game_skills/hoi4/`)**: Production-ready reference pack with 15 visual/OCR selectors and 25 verified skills categorized into Tier A (Essential controls), Tier B (Economy & State), and Tier C (Military planning).
+5. **HOI4 Strategic Knowledge Base (`game_skills/hoi4/knowledge/`)**: Prebuilt campaign guidelines, rules & bans (FAIR/META), operating loops, economic horizons, and country playbooks (Germany, China, Poland) retrieved on-demand via `hoi4_get_knowledge`.
+6. **Advanced Perception (`ugm.adapters.hoi4.perception`)**: Morphological differential tooltip detection, warm parchment / news popup window segmentation, hazard-stripe pause verification, and resilient OCR date parsing.
+7. **Verified Self-Learning (`ugm.skills.learner`)**: Procedural learning pipeline: **Observe → Identify → Plan → Act → Verify → Learn → Reuse**. Candidate skills undergo validation track records before promotion to verified skills. Curated skills are strictly protected.
+8. **Skill Execution Engine (`ugm.skills.engine`)**: Runtime executor with allowlisted primitives (`press_keys`, `click_target`, `locate_and_click`, `click_selector`, `hover`, `wait`, `verify_state`), precondition checks, postcondition verification, and emergency stop killswitch.
+9. **Local Game Asset Indexer (`ugm.assets.indexer`)**: Read-only parser for installed HOI4 `.gui`, `.gfx`, and `.yml` files into local caches without modifying game files or process memory.
 
 ---
 
-## 🛠 Complete MCP Tool Reference (21 Tools)
+## 🛠 Complete MCP Tool Reference (26 Tools)
+
+### HOI4 Specific Tools (Prebuilt V1.5)
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `hoi4_get_knowledge` | `topic`, `subtopic` | Retrieves prebuilt campaign playbooks on-demand (`rules_and_modes`, `operating_loop`, `strategy_core`, `country` -> `germany_fair`, `china_fair`, `poland_meta`). |
+| `hoi4_detect_environment` | `custom_game_path` | Discovers local HOI4 installations across Steam libraries, checks running process, and verifies OCR readiness. |
+| `hoi4_read_topbar` | `detailed` | Event-driven OCR across topbar resources; extracts parsed date, pause status, and speed level when detailed=True. |
+| `hoi4_read_tooltip` | `target`, `x`, `y` | Hovers over target selector/coordinate, detects differential tooltip bounding box, and extracts text via OCR. |
+| `hoi4_detect_popups` | *(none)* | Scans active view for modal country events or newspaper popups using paper mask segmentation. |
 
 ### V1 Perception, Input & Safety Tools
 | Tool Name | Parameters | Description |
