@@ -42,7 +42,20 @@ class WindowManager:
 
     @property
     def current_window(self) -> Optional[WindowInfo]:
+        if self._mock_window is not None:
+            return self._mock_window
+        if self._current_window is not None and sys.platform == "win32":
+            try:
+                import win32gui
+                if win32gui.IsWindow(self._current_window.hwnd):
+                    self._current_window = self.get_window_info(self._current_window.hwnd)
+            except Exception:
+                pass
         return self._current_window
+
+    def refresh_current_window(self) -> Optional[WindowInfo]:
+        """Explicitly re-queries the window geometry and state from the OS."""
+        return self.current_window
 
     def find_window(
         self,

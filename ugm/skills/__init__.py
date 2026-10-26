@@ -20,6 +20,8 @@ from .contracts import (
     CrossModelSkillShareContract,
     SkillPackageBundle
 )
+from .engine import SkillExecutionEngine, SkillExecutionResult
+from .learner import SkillLearner
 
 __all__ = [
     "GameManifest",
@@ -29,6 +31,9 @@ __all__ = [
     "ManifestValidationError",
     "GameSkillPack",
     "GameSkillPackLoader",
+    "SkillExecutionEngine",
+    "SkillExecutionResult",
+    "SkillLearner",
     "SkillExecutionMode",
     "NavigationNode",
     "NavigationEdge",

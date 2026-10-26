@@ -1,132 +1,150 @@
-# Universal Game MCP (UGM)
+# Universal Game MCP (UGM) - V1.5
 
 [![Windows CI](https://github.com/universal-game-mcp/ugm/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/universal-game-mcp/ugm/actions/workflows/windows-ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![MCP SDK v2](https://img.shields.io/badge/MCP%20SDK-v2.3.0-green.svg)](https://github.com/modelcontextprotocol/python-sdk)
+[![Version: 1.5.0](https://img.shields.io/badge/Release-v1.5.0-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tested on Ryzen 5 5500U](https://img.shields.io/badge/Hardware-AMD%20Ryzen%205%205500U-orange.svg)]()
 
-> **English** | [Tiếng Việt (Vietnamese Guide)](docs/vi/README_vi.md)
+> **English** | [Tiếng Việt (Vietnamese Guide)](docs/vi/README_vi.md) | [HOI4 Guide](docs/vi/HOI4_GUIDE_vi.md) | [Skill Packs](game_skills/README.md)
 
-**Universal Game MCP (UGM)** is a lightweight, CPU-friendly open-source Model Context Protocol (MCP) server that empowers AI assistants to observe, read text, locate icons, send DirectInput keyboard/mouse controls, and verify action outcomes in offline games (starting with **Hearts of Iron IV**).
+**Universal Game MCP (UGM)** is a lightweight, CPU-friendly Model Context Protocol (MCP) server that empowers external AI agents to play, navigate, and learn offline strategy and simulation games (starting with **Hearts of Iron IV**).
+
+The AI model provides reasoning. Universal Game MCP provides:
+- **Eyes**: screen capture, event-driven OCR, icon and template matching.
+- **Hands**: DirectInput mouse and keyboard control with dry-run protection.
+- **Memory**: persistent SQLite knowledge store with WAL mode, schema migrations, and perceptual hashing.
+- **Navigation**: UI state recognition and Dijkstra graph traversal across menus and panels.
+- **Skills**: validated execution engine for curated and learned macro workflows.
+- **Self-Learning**: procedural discovery, validation, promotion, and reuse of action workflows.
 
 ---
 
 ## ⚡ Measured Benchmark & Performance Profile
 
-Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64) under actual CPU execution:
+Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64, integrated Radeon graphics) under actual CPU execution:
 
-| Subsystem | Measured Latency | Throughput / Speedup | Notes |
-|---|---|---|---|
-| **Capture (DMA/Memory Buffer)** | **2.20 ms** | ~450 FPS buffer pull | DXGI Desktop Duplication API / DMA |
-| **ROI Template Match (OpenCV)** | **51.27 ms** | **14.5x faster** than full screen | Multi-scale template matching + NMS |
-| **Full-Screen Template Match** | **743.10 ms** | Baseline | Full 1080p scan |
-| **Event-driven ROI OCR** | **705.05 ms** | **3.0x faster** than full screen | PP-OCRv4 CPU (no GPU required) |
-| **Full-Screen 1080p OCR** | **2,115.99 ms** | Heavy (unoptimized) | Avoided at runtime via ROI crop |
-| **Visual Diff Verification** | **4.58 ms** | Real-time state check | Absdiff + threshold check |
-| **RAM Footprint (Steady State)** | **117.65 MB** | **< 120 MB RAM total** | Extremely light on CPU & memory |
-
----
-
-## 🏗 Architecture & Design Principles
-
-```
-                  +-----------------------------------+
-                  |        AI Client / LLM Agent      |
-                  +-----------------+-----------------+
-                                    | (MCP SDK v2 JSON-RPC)
-                                    v
-                  +-----------------------------------+
-                  |    Universal Game MCP Server      |
-                  |          (ugm.server)             |
-                  +-----------------+-----------------+
-                                    |
-        +---------------------------+---------------------------+
-        |                           |                           |
-        v                           v                           v
-+---------------+           +---------------+           +---------------+
-|  ugm.core     |           | ugm.adapters  |           | ugm.safety    |
-| - capture     |           | - hoi4        |           | - killswitch  |
-| - ocr         |           | - offline_sim |           | - dry_run     |
-| - icon        |           | - generic     |           | - bounds      |
-| - input       |           +---------------+           | - anti-cheat  |
-| - verifier    |                                       +---------------+
-+---------------+
-```
-
-1. **Game-Agnostic Core**: The core subsystems (`capture`, `ocr`, `icon`, `input`, `verifier`, `safety`) operate entirely independently of any specific title.
-2. **Modular Adapters (Plugins)**:
-   - `ugm.adapters.hoi4`: Hearts of Iron IV plugin (Topbar metrics, research, diplomacy, pause key).
-   - `ugm.adapters.sim`: Self-contained offline strategy simulator for testing without commercial games installed.
-   - `ugm.adapters.generic`: Generic adapter for arbitrary strategy/simulation titles.
-3. **Event-Driven ROI OCR**: Rather than burning CPU cycles doing continuous 60fps full-screen OCR, UGM captures and OCRs *only on demand* when triggered by specific events (reading a tooltip, reading topbar statistics, reading dialogue options).
-4. **Coordinate Normalization**: All returned bounding boxes and points are normalized `[0.0, 1.0]` relative to the target game window client rectangle.
-5. **Safety by Default**:
-   - Ambiguity protection: If icon/text detection is ambiguous, UGM reports ambiguity so AI can hover to inspect tooltip rather than clicking blindly.
-   - Out-of-bounds containment: Input commands outside target window are rejected.
-   - Dry-Run mode: Allows simulating clicks without dispatching hardware input.
-   - Emergency Stop: Instant global killswitch blocks all further inputs.
-   - Anti-Cheat Blocker: Strictly refuses execution if online anti-cheat engines (EAC, BattlEye, Vanguard) are detected.
-6. **Privacy First**: Dataset recording is opt-in (`disabled by default`) and automatically excluded from Git.
-
----
-
-## 🛠 Standard MCP Tools
-
-| Tool Name | Prioritized V1 Capabilities | Description |
+| Subsystem | Measured Latency | Throughput / Notes |
 |---|---|---|
-| `get_game_window` | Windows geometry & DPI scaling | Finds and attaches to target game window; returns client rectangle, DPI scale, and focus state. |
-| `capture_screen` | Native resolution capture | Captures current game frame (supports ROI cropping, Base64 preview, and disk saving). |
-| `read_text` | Small UI text & ROI OCR | Event-driven RapidOCR reading on normalized ROI with small-text enhancement. |
-| `locate_ui_element` | Multimodal target resolution | Locates UI elements via icon template, OCR text, or registered selector with ambiguity detection. |
-| `locate_icon` | Backward-compatible alias | Multi-scale OpenCV template matching with NMS and ambiguity detection. |
-| `hover_target` | Tooltip verification | Hovers mouse at normalized `(x, y)` and reads popup tooltip via event OCR. |
-| `click_target` | State verification & dynamic targets | Clicks at coordinates `(x, y)` or dynamically resolved selectors; verifies visual state before confirming success. |
-| `press_keys` | DirectInput keystrokes | Sends DirectInput keystrokes (e.g. `['space']` for pause, `['num+']` for speed) with timeout. |
-| `verify_state` | Visual diff & text check | Computes visual state difference and optional expected text verification. |
-| `verify_selection` | Backward-compatible alias | Legacy alias for visual state change verification. |
-| `emergency_stop` | Safety killswitch | Instant emergency killswitch halting all inputs and rejecting subsequent actions. |
-| `save_training_sample` | Privacy-first dataset | Opt-in recording of annotated game frames to `data/samples/`. |
+| **Synthetic In-Memory Fixture Latency** | **1.79 ms** | In-memory memcpy baseline buffer grab |
+| **ROI Template Match (OpenCV)** | **43.97 ms** | **13.2x faster** than full screen (Multi-scale + NMS) |
+| **Full-Screen Template Match** | **579.94 ms** | Full 1080p scan |
+| **Event-driven ROI OCR** | **831.89 ms** | PP-OCRv4 CPU on target bounding box |
+| **Full-Screen 1080p OCR** | **2,185.15 ms** | Heavy; avoided at runtime via ROI crop |
+| **Visual Diff Verification** | **5.48 ms** | Real-time state verification (absdiff + threshold) |
+| **RAM Footprint (Steady State)** | **136.12 MB** | Entire engine, OCR runtime & SQLite in RAM (< 150 MB) |
+
+> [!NOTE]
+> Synthetic in-memory fixture benchmarks are explicitly distinguished from live DXGI desktop duplication captures to prevent misleading performance claims.
 
 ---
 
-## 🎮 Game Skills Architecture (Modular & Independent)
+## 🏗 Architecture (V1.5 Self-Learning Infrastructure)
 
-The `game_skills/` directory provides game-independent declarative manifests, UI selectors, templates, and macro skills:
+```
+                    +-----------------------------------+
+                    |        AI Client / LLM Agent      |
+                    +-----------------+-----------------+
+                                      | (MCP SDK v2 JSON-RPC)
+                                      v
+                    +-----------------------------------+
+                    |    Universal Game MCP Server      |
+                    |          (ugm.server)             |
+                    +-----------------+-----------------+
+                                      |
+         +----------------------------+----------------------------+
+         |                            |                            |
+         v                            v                            v
++------------------+         +------------------+         +------------------+
+|    ugm.core      |         |   ugm.memory     |         |   ugm.navigation |
+| - capture (live) |         | - database.py    |         | - recognizer.py  |
+| - input (direct) |         |   (SQLite WAL)   |         |   (dHash + OCR)  |
+| - ocr (rapidocr) |         | - storage.py     |         | - graph.py       |
+| - icon (opencv)  |         | - migrations     |         |   (Dijkstra)     |
+| - verifier       |         | - dHash & pruner |         | - navigator.py   |
+| - safety         |         +------------------+         +------------------+
++------------------+                  |                            |
+         |                            v                            v
+         |                   +------------------+         +------------------+
+         |                   |    ugm.skills    |         |   ugm.assets     |
+         +------------------>| - engine.py      |         | - indexer.py     |
+                             | - learner.py     |         |   (.gui/.gfx)    |
+                             | - loader.py      |         +------------------+
+                             +------------------+
+```
+
+### Core V1.5 Subsystems
+1. **Persistent Memory (`ugm.memory`)**: SQLite with WAL mode, schema version tracking, perceptual hash matching (dHash), bounded storage pruning, and source attribution (`live` vs `synthetic_fixture`).
+2. **UI State Recognizer (`ugm.navigation.recognizer`)**: Multi-signal classifier combining perceptual hashing, event OCR, panel geometry, and confidence scoring (`known`, `ambiguous`, `unknown`).
+3. **Navigation Graph (`ugm.navigation.graph`, `ugm.navigation.navigator`)**: Directed graph where nodes are UI states and edges are verified executable actions. Plans lowest-cost routes via Dijkstra, verifies state after each step, and replans or halts on mismatch.
+4. **Verified Self-Learning (`ugm.skills.learner`)**: Procedural learning pipeline: **Observe → Identify → Plan → Act → Verify → Learn → Reuse**. Candidate skills undergo validation track records before promotion to verified skills. Curated skills are strictly protected.
+5. **Skill Execution Engine (`ugm.skills.engine`)**: Runtime executor with allowlisted primitives (`press_keys`, `click_target`, `locate_and_click`, `click_selector`, `hover`, `wait`, `verify_state`), precondition checks, postcondition verification, and emergency stop killswitch.
+6. **Local Game Asset Indexer (`ugm.assets.indexer`)**: Read-only parser for installed HOI4 `.gui`, `.gfx`, and `.yml` files into local caches without modifying game files or process memory.
+
+---
+
+## 🛠 Complete MCP Tool Reference (21 Tools)
+
+### V1 Perception, Input & Safety Tools
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `get_game_window` | `title_pattern`, `process_name` | Finds and attaches to target game window; returns geometry, DPI scale, and client rect. |
+| `capture_screen` | `roi`, `save_to_disk`, `include_base64` | Captures current game frame with client rect coordinates. |
+| `read_text` | `roi`, `enhance_small_text` | Event-driven RapidOCR reading on normalized ROI. |
+| `locate_ui_element` | `icon_name`, `text`, `selector_id`, `threshold` | Multimodal target resolution with ambiguity detection. |
+| `locate_icon` | `icon_name`, `threshold`, `roi` | Multi-scale OpenCV template matching with NMS. |
+| `hover_target` | `x`, `y`, `duration_ms` | Hovers mouse at normalized `(x, y)` and reads popup tooltip. |
+| `click_target` | `x`, `y`, `selector_id`, `dry_run`, `verify` | Clicks target dynamically; verifies visual state before confirming. |
+| `press_keys` | `keys`, `duration_ms`, `dry_run` | Sends DirectInput keystrokes (e.g. `['space']` for pause). |
+| `verify_state` | `roi`, `expected_text`, `pre_capture_id` | Computes visual difference and validates state transition. |
+| `emergency_stop` | none | Instant global emergency killswitch halting all input. |
+| `save_training_sample` | `label`, `metadata` | Opt-in recording of annotated game frames to `data/samples/`. |
+
+### V1.5 Persistent Memory, Navigation & Self-Learning Tools
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `list_game_packs` | none | Lists discovered curated packs and registered games in persistent memory. |
+| `get_ui_state` | `game_id`, `hint_state` | Classifies current game UI state (e.g. `main_map`, `production`) with confidence and evidence. |
+| `memory_search` | `game_id`, `query`, `search_type`, `limit` | Searches persistent SQLite memory across states, transitions, skills, or action history. |
+| `get_navigation_plan` | `target_state`, `start_state`, `game_id` | Calculates optimal multi-step navigation route using Dijkstra algorithm. |
+| `navigate_to` | `target_state`, `game_id`, `max_retries`, `dry_run` | Safely traverses menus step-by-step with state verification and replanning. |
+| `execute_skill` | `skill_id`, `game_id`, `params`, `dry_run` | Executes a curated or learned Game Skill with precondition/postcondition checks. |
+| `learn_skill` | `skill_id`, `name`, `steps`, `game_id`, `preconditions`, `post_verification` | Saves newly discovered action sequence as candidate skill in persistent memory. |
+| `list_learned_skills` | `game_id`, `status` | Lists procedurally learned skills, validation track records, and status. |
+| `get_learning_status` | `game_id` | Reports persistent memory statistics (states, transitions, action history, skills). |
+| `delete_learned_memory` | `game_id`, `skill_id`, `scope` | Safely deletes scoped memory or individual learned skill. |
+| `index_game_assets` | `game_path`, `game_id` | Read-only extraction of UI metadata and sprites from installed game files into local cache. |
+
+---
+
+## 🎮 Game Skill Packs (Curated & Learned)
 
 ```text
 game_skills/
-├── README.md                      # Architecture and specifications
+├── README.md                      # Skill pack architecture & JSON schemas
 ├── _template/                     # Starter template for new games
-│   ├── manifest.json              # Versioned manifest schema (1.0.0)
-│   ├── skills/                    # Atomic skills (e.g. example_skill.json)
-│   ├── selectors/                 # Visual and OCR selectors (e.g. example_selector.json)
-│   └── templates/                 # CV image templates
-└── hoi4/                          # Hearts of Iron IV reference pack
-    ├── manifest.json              # HOI4 metadata, process names, resolutions
-    ├── README.md                  # HOI4 reference pack documentation
-    ├── skills/                    # pause_unpause, open_production, select_army_group, increase_speed
-    ├── selectors/                 # topbar_factories, political_power, pause_button, army_group_leader
-    ├── templates/                 # PNG templates for template matching
-    └── tests/                     # Manifest validation fixtures
+└── hoi4/                          # Hearts of Iron IV Reference Pack
+    ├── manifest.json              # Process names, resolutions, dpi-awareness
+    ├── skills/                    # Curated skills (pause_unpause, open_production, increase_speed, select_army_group)
+    ├── selectors/                 # Visual and OCR selectors (topbar_factories, political_power, pause_button)
+    └── templates/                 # Reference PNG icons for template matching
 ```
 
-- **Reference Pack**: HOI4 is the first reference game pack, not a dependency of MCP Core.
-- **Dynamic Selectors**: Avoids hardcoding screen pixel coordinates; resolves elements dynamically.
-- **Strict Verification**: Never reports success based solely on whether a mouse click was sent; compares pre/post frames.
-- **Ambiguity Rejection**: Rejects ambiguous targets and outputs structured `VisionAgentEscalation` payloads when uncertain.
-- **V1.5 Contract Preparation**: Defines lightweight interface specifications for Registry, Knowledge Storage, and Navigation Graph without early implementation.
+- **Curated Skill Protection**: Curated skills in `game_skills/` are read-only at runtime and can never be overwritten by self-learning calls.
+- **Procedural Promotion**: Learned skills start as `candidate` and promote to `verified` after ≥ 3 successful validations with confidence ≥ 0.85.
+- **Security Sandboxing**: Execution of arbitrary shell scripts or code is blocked; only allowlisted primitives are permitted.
 
 ---
 
 ## 🚀 Quickstart
 
 ### 1. Installation
-
 Requires **Python 3.12** on Windows 10/11 x64:
 
 ```powershell
-# Clone or enter directory
+# Clone repository
+git clone https://github.com/QuafdaPoet/universal-game-mcp.git
 cd universal-game-mcp
 
 # Create Python 3.12 virtualenv
@@ -136,52 +154,34 @@ uv venv --python 3.12 .venv
 # Activate virtualenv
 .\.venv\Scripts\activate
 
-# Install pinned dependencies
-pip install -r requirements.txt
+# Install dependencies in editable mode
+pip install -e .
 ```
 
-### 2. Generate Test Fixtures & Icons
-
+### 2. Generate Test Fixtures & Run Offline Tests
 ```powershell
+# Generate offline test fixtures
 python scripts/generate_fixtures.py
-```
 
-### 3. Run Automated Tests (No Game Required)
-
-```powershell
+# Run all 99 automated tests (100% offline, no game required)
 pytest -v
 ```
-*All 58 unit and integration tests run entirely offline using image fixtures.*
 
-### 4. Run the CPU Latency & RAM Benchmark
-
+### 3. Run CPU Latency & RAM Profiling Benchmark
 ```powershell
 python scripts/benchmark_cpu_ram.py
 ```
 
-### 5. Run the End-to-End Offline Demo
-
-If you do not have Hearts of Iron IV installed, run the self-contained offline simulator demo:
-
+### 4. Starting the Universal Game MCP Server
 ```powershell
-python scripts/demo_offline_sim.py
-```
-
-Or launch the interactive Tkinter game simulator:
-
-```powershell
-python scripts/offline_game_sim.py
-```
-
-### 6. Starting the MCP Server
-
-```powershell
-# Run with stdio transport (for Claude Desktop, Cursor, or Antigravity MCP)
+# Run with stdio transport (Claude Desktop, Cursor, or Antigravity IDE)
 python -m ugm.server
+
+# Or enforce dry-run server-wide (inviolable hardware simulation)
+python -m ugm.server --dry-run
 ```
 
-Configuration snippet for Claude Desktop or MCP client config (`mcpServers`):
-
+#### MCP Client Configuration (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
@@ -195,15 +195,16 @@ Configuration snippet for Claude Desktop or MCP client config (`mcpServers`):
 
 ---
 
-## 🔒 Safety and Compliance
+## 🔒 Safety and Anti-Cheat Policies
 
-- **Offline & Single Player Only**: UGM is exclusively created for offline, single-player games and educational testing.
-- **Zero Anti-Cheat Bypass**: UGM includes a built-in process blacklist checking for anti-cheat services. Any detection triggers an immediate emergency shutdown.
-- **Dry-run First**: AI agents are encouraged to run actions with `dry_run=True` before issuing live inputs.
+- **Offline & Single-Player Only**: Exclusively intended for single-player, offline strategy/simulation games.
+- **Strict Anti-Cheat Blocker**: Active process checks immediately abort and trigger emergency stop if anti-cheat services (EAC, BattlEye, Vanguard, Ricochet, etc.) are detected.
+- **Server-Wide Dry-Run**: When launched with `--dry-run`, tool calls cannot override it with `dry_run=False`.
+- **Emergency Stop Killswitch**: The `emergency_stop` tool instantly locks out mouse and keyboard inputs.
 
 ---
 
-## 📄 License
+## 📄 License & Attribution
 
 - Source code authored for UGM is licensed under the [MIT License](LICENSE).
 - Third-party dependencies are acknowledged in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

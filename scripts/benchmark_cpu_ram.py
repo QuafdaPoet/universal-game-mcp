@@ -56,8 +56,8 @@ def benchmark_suite():
     h, w = img.shape[:2]
     print(f"Test Frame Dimensions: {w}x{h} (1080p BGR)")
 
-    # 2. Benchmark Screen Capture Backend
-    print("\n[1/5] Benchmarking Screen Capture Latency...")
+    # 2. Benchmark Screen Capture Backends (Separating Synthetic from Real Live Capture)
+    print("\n[1a/5] Benchmarking Synthetic In-Memory Fixture Latency (Memcpy baseline)...")
     backend = FixtureBackend(img)
     cap = CaptureManager(backend_override=backend)
 
@@ -69,7 +69,22 @@ def benchmark_suite():
 
     capture_avg = np.mean(times)
     capture_p95 = np.percentile(times, 95)
-    print(f"  Capture (Memory/DMA): Avg = {capture_avg:.3f} ms | P95 = {capture_p95:.3f} ms")
+    print(f"  Synthetic In-Memory Fixture: Avg = {capture_avg:.3f} ms | P95 = {capture_p95:.3f} ms")
+    print("  * NOTICE: This measures pure in-memory numpy copy latency, distinct from live screen capture.")
+
+    print("\n[1b/5] Benchmarking Live Screen Capture (Desktop Duplication / MSS / GDI)...")
+    try:
+        live_cap = CaptureManager(allow_fixture_fallback=False)
+        live_times = []
+        for _ in range(10):
+            t0 = time.perf_counter()
+            _ = live_cap.capture()
+            live_times.append((time.perf_counter() - t0) * 1000.0)
+        live_avg = np.mean(live_times)
+        live_p95 = np.percentile(live_times, 95)
+        print(f"  Live Screen Capture ({type(live_cap.backend).__name__}): Avg = {live_avg:.2f} ms | P95 = {live_p95:.2f} ms")
+    except Exception as e:
+        print(f"  Live Screen Capture: Not available in current headless/virtual session ({e}). Synthetic measurements kept separate.")
 
     # 3. Benchmark Icon Detection (Template Matching)
     print("\n[2/5] Benchmarking Icon Detection (OpenCV Template Matching)...")

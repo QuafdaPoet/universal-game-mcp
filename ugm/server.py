@@ -42,6 +42,17 @@ from .core.target import TargetResolver, TargetExecutor
 from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
+# V1.5 Subsystems
+from .memory.database import DatabaseManager
+from .memory.storage import PersistentKnowledgeStorage
+from .navigation.recognizer import UIStateRecognizer, UIStateDetection
+from .navigation.graph import NavigationGraph, PathResult
+from .navigation.navigator import UINavigator, NavigationResult
+from .skills.engine import SkillExecutionEngine, SkillExecutionResult
+from .skills.learner import SkillLearner
+from .skills.contracts import NavigationNode, NavigationEdge
+from .assets.indexer import GameAssetIndexer
+
 # Ensure UTF-8 output on Windows
 if sys.platform == "win32":
     try:
@@ -64,7 +75,8 @@ class UGMContext:
         self,
         offline_fixture: Optional[str] = None,
         ocr_backend: str = "rapidocr",
-        skills_pack_dir: Optional[str] = "game_skills/hoi4"
+        skills_pack_dir: Optional[str] = "game_skills/hoi4",
+        db_path: Optional[str] = None
     ):
         self.window_manager = WindowManager()
         self.capture_manager = CaptureManager()
@@ -79,8 +91,16 @@ class UGMContext:
         self.hoi4_adapter = HOI4Adapter()
         self.hoi4_adapter.register_icons(self.icon_detector)
 
+        # Loaded skill packs
+        self.skill_packs: Dict[str, GameSkillPack] = {}
+
         # Target Resolver & Executor
-        self.target_resolver = TargetResolver(self.icon_detector, self.ocr_engine, self.verifier)
+        self.target_resolver = TargetResolver(
+            self.icon_detector,
+            self.ocr_engine,
+            self.verifier,
+            skill_packs=self.skill_packs
+        )
         self.target_executor = TargetExecutor(
             self.target_resolver,
             self.capture_manager,
@@ -88,8 +108,6 @@ class UGMContext:
             self.verifier
         )
 
-        # Loaded skill packs
-        self.skill_packs: Dict[str, GameSkillPack] = {}
         if skills_pack_dir and os.path.isdir(skills_pack_dir):
             try:
                 pack = GameSkillPackLoader.load_pack(skills_pack_dir)
@@ -105,8 +123,110 @@ class UGMContext:
             except Exception as e:
                 logger.debug("Skill pack autoload notice for %s: %s", skills_pack_dir, e)
 
+        # V1.5 Persistent Memory & Knowledge Storage
+        self.storage = PersistentKnowledgeStorage(DatabaseManager(db_path or "data/memory/ugm_memory.db"))
+        self._init_default_game_metadata()
+
+        # V1.5 UI State Recognizer
+        self.state_recognizer = UIStateRecognizer(
+            ocr_engine=self.ocr_engine,
+            icon_detector=self.icon_detector,
+            storage=self.storage
+        )
+
+        # V1.5 Navigation Graphs & Navigators
+        self.navigation_graphs: Dict[str, NavigationGraph] = {}
+        self.navigators: Dict[str, UINavigator] = {}
+
+        # V1.5 Skill Execution Engine & Learner
+        self.skill_engine = SkillExecutionEngine(
+            capture_manager=self.capture_manager,
+            input_controller=self.input_controller,
+            target_resolver=self.target_resolver,
+            target_executor=self.target_executor,
+            verifier=self.verifier,
+            ocr_engine=self.ocr_engine,
+            storage=self.storage,
+            skill_packs=self.skill_packs
+        )
+        self.skill_learner = SkillLearner(
+            storage=self.storage,
+            execution_engine=self.skill_engine
+        )
+
+        # V1.5 Asset Indexer
+        self.asset_indexer = GameAssetIndexer()
+
         if offline_fixture and os.path.exists(offline_fixture):
             self.setup_offline_fixture(offline_fixture)
+
+    def _init_default_game_metadata(self) -> None:
+        try:
+            self.storage.register_game(
+                game_id="hoi4",
+                name="Hearts of Iron IV",
+                version="1.0.0",
+                base_res=(1920, 1080)
+            )
+            self.storage.register_game(
+                game_id="offline_sim",
+                name="UGM Offline Strategy Simulator",
+                version="1.0.0",
+                base_res=(900, 550)
+            )
+        except Exception as e:
+            logger.debug("Default game metadata notice: %s", e)
+
+    def get_navigation_graph(self, game_id: str = "hoi4") -> NavigationGraph:
+        if game_id not in self.navigation_graphs:
+            graph = NavigationGraph(game_id=game_id, storage=self.storage)
+            if game_id == "hoi4":
+                self._populate_hoi4_navigation_graph(graph)
+            elif game_id == "offline_sim":
+                self._populate_sim_navigation_graph(graph)
+            self.navigation_graphs[game_id] = graph
+        return self.navigation_graphs[game_id]
+
+    def get_navigator(self, game_id: str = "hoi4") -> UINavigator:
+        if game_id not in self.navigators:
+            graph = self.get_navigation_graph(game_id)
+            nav = UINavigator(
+                recognizer=self.state_recognizer,
+                graph=graph,
+                capture_manager=self.capture_manager,
+                input_controller=self.input_controller,
+                target_executor=self.target_executor,
+                target_resolver=self.target_resolver
+            )
+            self.navigators[game_id] = nav
+        return self.navigators[game_id]
+
+    def _populate_hoi4_navigation_graph(self, graph: NavigationGraph) -> None:
+        nodes = ["main_map", "production", "construction", "research", "diplomacy", "recruitment"]
+        for nid in nodes:
+            graph.register_node(NavigationNode(node_id=nid, menu_name=nid.capitalize(), game_id="hoi4", identification_selector=""))
+
+        # Add bidirectional transitions between main_map and sub-panels
+        transitions = [
+            ("main_map", "production", "press_keys", {"keys": ["y"]}),
+            ("production", "main_map", "press_keys", {"keys": ["escape"]}),
+            ("main_map", "construction", "press_keys", {"keys": ["t"]}),
+            ("construction", "main_map", "press_keys", {"keys": ["escape"]}),
+            ("main_map", "research", "press_keys", {"keys": ["w"]}),
+            ("research", "main_map", "press_keys", {"keys": ["escape"]}),
+            ("main_map", "diplomacy", "press_keys", {"keys": ["e"]}),
+            ("diplomacy", "main_map", "press_keys", {"keys": ["escape"]}),
+            ("main_map", "recruitment", "press_keys", {"keys": ["u"]}),
+            ("recruitment", "main_map", "press_keys", {"keys": ["escape"]}),
+        ]
+        for src, tgt, act, params in transitions:
+            graph.register_edge(NavigationEdge(source_node_id=src, target_node_id=tgt, trigger_action=act, parameters=params, cost=1.0), persist=False)
+
+    def _populate_sim_navigation_graph(self, graph: NavigationGraph) -> None:
+        graph.register_node(NavigationNode(node_id="main_view", menu_name="Main View", game_id="offline_sim", identification_selector=""))
+        graph.register_node(NavigationNode(node_id="paused", menu_name="Paused", game_id="offline_sim", identification_selector=""))
+        graph.register_edge(NavigationEdge("main_view", "paused", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
+        graph.register_edge(NavigationEdge("paused", "main_view", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
 
     def setup_offline_fixture(self, fixture_path: str) -> None:
         """Sets up a mock game window and fixture image for offline operation."""
@@ -142,8 +262,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ctx = context or UGMContext()
     server = MCPServer(
         name="universal-game-mcp",
-        version="1.0.0",
-        instructions="Universal Game MCP (UGM) allows AI to observe, read text, locate icons, and interact safely with offline games."
+        version="1.5.0",
+        instructions="Universal Game MCP (UGM) allows AI agents to observe, read text, locate icons, interact safely, navigate menus, execute game skills, and learn verified procedural knowledge across game sessions."
     )
 
     # 1. get_game_window
@@ -375,14 +495,42 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
         target_resolution = None
         if (x is None or y is None) and (selector_id or text_query or icon_name):
+            resolved_icon_name = icon_name
+            resolved_text_pattern = text_query
+            resolved_roi = norm_ver_roi
+            resolved_threshold = 0.80
+            resolved_hover = False
+            resolved_tooltip = None
+
+            if selector_id:
+                for pack in ctx.skill_packs.values():
+                    if selector_id in pack.selectors:
+                        sel = pack.selectors[selector_id]
+                        if not resolved_icon_name and sel.template_file:
+                            resolved_icon_name = selector_id
+                        if not resolved_text_pattern and sel.text_pattern:
+                            resolved_text_pattern = sel.text_pattern
+                        if not resolved_roi and sel.search_roi:
+                            resolved_roi = sel.search_roi
+                        resolved_threshold = sel.threshold
+                        resolved_hover = sel.hover_verification
+                        resolved_tooltip = sel.expected_tooltip_contains
+                        break
+
             frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
             target_resolution = ctx.target_resolver.resolve_target(
                 frame=frame,
-                icon_name=icon_name,
-                text_pattern=text_query,
+                icon_name=resolved_icon_name,
+                text_pattern=resolved_text_pattern,
+                search_roi=resolved_roi,
+                threshold=resolved_threshold,
+                hover_verification=resolved_hover,
+                expected_tooltip=resolved_tooltip,
                 selector_id=selector_id,
                 dry_run=dry_run
             )
+            if norm_ver_roi is None and resolved_roi:
+                norm_ver_roi = resolved_roi
 
         click_res = ctx.target_executor.click_and_verify(
             norm_x=x,
@@ -432,9 +580,25 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
 
         pre_frame = None
-        if pre_capture_id and pre_capture_id in ctx.pre_capture_cache:
+        if pre_capture_id is not None:
+            if pre_capture_id not in ctx.pre_capture_cache:
+                return {
+                    "verified": False,
+                    "diff_ratio": 0.0,
+                    "message": f"Verification failed: pre_capture_id '{pre_capture_id}' was not found in cache or has expired.",
+                    "latency_ms": 0.0,
+                    "details": {"error": "invalid_pre_capture_id"}
+                }
             pre_frame = ctx.pre_capture_cache[pre_capture_id]
         else:
+            if expected_text is None and min_diff_ratio > 0.0:
+                return {
+                    "verified": False,
+                    "diff_ratio": 0.0,
+                    "message": "Verification failed: no baseline pre_capture_id provided for visual diff verification.",
+                    "latency_ms": 0.0,
+                    "details": {"error": "missing_baseline"}
+                }
             pre_frame = post_frame
 
         ver_res = ctx.verifier.verify_selection(
@@ -496,6 +660,258 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             force=force
         )
 
+    # 11. list_game_packs
+    @server.tool()
+    def list_game_packs() -> Dict[str, Any]:
+        """
+        Discovers and lists all installed curated Game Skill Packs and registered games in persistent memory.
+        """
+        packs_out = []
+        for gid, pack in ctx.skill_packs.items():
+            packs_out.append({
+                "game_id": gid,
+                "name": pack.manifest.name,
+                "version": pack.manifest.version,
+                "description": pack.manifest.description,
+                "is_curated": True,
+                "selectors_count": len(pack.selectors),
+                "skills_count": len(pack.skills),
+                "skills": list(pack.skills.keys()),
+                "selectors": list(pack.selectors.keys())
+            })
+        for g in ctx.storage.list_games():
+            gid = g["game_id"]
+            if gid not in ctx.skill_packs:
+                learned_skills = ctx.storage.list_learned_skills(game_id=gid)
+                packs_out.append({
+                    "game_id": gid,
+                    "name": g["name"],
+                    "version": g["version"],
+                    "description": "Dynamic game registered via learned knowledge",
+                    "is_curated": False,
+                    "selectors_count": 0,
+                    "skills_count": len(learned_skills),
+                    "skills": [s.skill_id for s in learned_skills],
+                    "selectors": []
+                })
+        return {
+            "count": len(packs_out),
+            "packs": packs_out
+        }
+
+    # 12. get_ui_state
+    @server.tool()
+    def get_ui_state(
+        game_id: str = "hoi4",
+        hint_state: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Classifies and reports the current game interface state (e.g. main_map, production, research, paused).
+        Returns confidence, supporting observable evidence, perceptual hash, and whether state is known/ambiguous/unknown.
+        """
+        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        det = ctx.state_recognizer.recognize_state(frame, game_id=game_id, hint_state=hint_state)
+        return det.to_dict()
+
+    # 13. memory_search
+    @server.tool()
+    def memory_search(
+        game_id: str = "hoi4",
+        query: Optional[str] = None,
+        search_type: str = "all",
+        limit: int = 20
+    ) -> Dict[str, Any]:
+        """
+        Retrieves relevant remembered experience from the persistent SQLite knowledge store.
+        Can search 'states', 'transitions', 'skills', 'actions', or 'all'.
+        """
+        results: Dict[str, Any] = {"game_id": game_id, "search_type": search_type}
+        if search_type in ("all", "states"):
+            states = ctx.storage.get_states(game_id)
+            if query:
+                states = [s for s in states if query.lower() in s.state_name.lower()]
+            results["states"] = [asdict(s) for s in states[:limit]]
+        if search_type in ("all", "transitions"):
+            transitions = ctx.storage.get_transitions(game_id)
+            if query:
+                transitions = [t for t in transitions if query.lower() in t.from_state.lower() or query.lower() in t.to_state.lower()]
+            results["transitions"] = [asdict(t) for t in transitions[:limit]]
+        if search_type in ("all", "skills"):
+            skills = ctx.storage.list_learned_skills(game_id=game_id)
+            if query:
+                skills = [s for s in skills if query.lower() in s.skill_id.lower() or query.lower() in s.name.lower()]
+            results["learned_skills"] = [asdict(s) for s in skills[:limit]]
+        if search_type in ("all", "actions"):
+            actions = ctx.storage.get_action_history(game_id=game_id, limit=limit)
+            results["action_history"] = actions
+        return results
+
+    # 14. get_navigation_plan
+    @server.tool()
+    def get_navigation_plan(
+        target_state: str,
+        start_state: Optional[str] = None,
+        game_id: str = "hoi4"
+    ) -> Dict[str, Any]:
+        """
+        Calculates optimal multi-step navigation route to destination UI state using Dijkstra pathfinding.
+        If start_state is omitted, live UI recognition identifies current starting position.
+        """
+        if not start_state:
+            frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+            det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
+            start_state = det.state_name
+
+        graph = ctx.get_navigation_graph(game_id)
+        plan = graph.plan_route(start_state=start_state, goal_state=target_state)
+        return {
+            "found": plan.found,
+            "start_state": plan.start_state,
+            "target_state": plan.target_state,
+            "total_cost": plan.total_cost,
+            "steps_count": len(plan.edges),
+            "nodes_path": plan.nodes,
+            "steps": [asdict(e) for e in plan.edges],
+            "message": plan.message
+        }
+
+    # 15. navigate_to
+    @server.tool()
+    def navigate_to(
+        target_state: str,
+        game_id: str = "hoi4",
+        max_retries: int = 2,
+        dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Safely navigates the game interface from current state to target destination state.
+        Verifies resulting state after every single step and replans or halts safely on failure.
+        """
+        navigator = ctx.get_navigator(game_id)
+        res = navigator.navigate_to(
+            target_state=target_state,
+            game_id=game_id,
+            max_retries=max_retries,
+            dry_run=dry_run
+        )
+        return res.to_dict()
+
+    # 16. execute_skill
+    @server.tool()
+    def execute_skill(
+        skill_id: str,
+        game_id: Optional[str] = "hoi4",
+        params: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Executes a registered curated or verified learned Game Skill.
+        Validates preconditions, dispatches sequential allowlisted primitives, verifies postconditions.
+        Never reports success unless postcondition verification passed.
+        """
+        res = ctx.skill_engine.execute_skill(
+            skill_id=skill_id,
+            game_id=game_id,
+            params=params,
+            dry_run=dry_run
+        )
+        return res.to_dict()
+
+    # 17. learn_skill
+    @server.tool()
+    def learn_skill(
+        skill_id: str,
+        name: str,
+        steps: List[Dict[str, Any]],
+        game_id: str = "hoi4",
+        description: str = "",
+        preconditions: Optional[Dict[str, Any]] = None,
+        post_verification: Optional[Dict[str, Any]] = None,
+        source: str = "live"
+    ) -> Dict[str, Any]:
+        """
+        Saves a newly discovered action sequence as a candidate reusable Game Skill in persistent memory.
+        Enforces allowlisted primitives, semantic selectors, and protects curated Game Skill Packs.
+        """
+        try:
+            res = ctx.skill_learner.learn_candidate_skill(
+                game_id=game_id,
+                skill_id=skill_id,
+                name=name,
+                steps=steps,
+                description=description,
+                preconditions=preconditions,
+                post_verification=post_verification,
+                source=source
+            )
+            res["success"] = True
+            return res
+        except Exception as e:
+            return {
+                "success": False,
+                "status": "rejected",
+                "skill_id": skill_id,
+                "message": f"Skill learning rejected: {e}"
+            }
+
+    # 18. list_learned_skills
+    @server.tool()
+    def list_learned_skills(
+        game_id: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Lists all procedurally learned skills, their validation track records, and status (candidate/verified/rejected).
+        """
+        skills = ctx.skill_learner.list_learned_skills(game_id=game_id, status=status)
+        return {
+            "count": len(skills),
+            "skills": skills
+        }
+
+    # 19. get_learning_status
+    @server.tool()
+    def get_learning_status(
+        game_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Reports overall persistent memory statistics: state counts, transitions, action history, and learned skills.
+        """
+        return ctx.skill_learner.get_learning_status(game_id=game_id)
+
+    # 20. delete_learned_memory
+    @server.tool()
+    def delete_learned_memory(
+        game_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        scope: str = "all"
+    ) -> Dict[str, Any]:
+        """
+        Safely deletes learned experience from persistent storage.
+        Can delete an individual skill by skill_id, or scoped by game_id and scope ('all', 'history', 'skills', 'transitions', 'states').
+        """
+        if skill_id:
+            deleted = ctx.skill_learner.delete_skill(skill_id)
+            return {
+                "deleted": deleted,
+                "skill_id": skill_id,
+                "message": f"Skill '{skill_id}' deleted." if deleted else f"Skill '{skill_id}' not found."
+            }
+        else:
+            return ctx.storage.delete_memory(game_id=game_id, scope=scope)
+
+    # 21. index_game_assets
+    @server.tool()
+    def index_game_assets(
+        game_path: str,
+        game_id: str = "hoi4"
+    ) -> Dict[str, Any]:
+        """
+        Extracts read-only UI metadata, sprite definitions, and localization keys from installed game files into local index cache.
+        Read-only; never alters game files or memory.
+        """
+        return ctx.asset_indexer.index_game_directory(game_id=game_id, game_path=game_path)
+
     return server
 
 
@@ -508,6 +924,7 @@ def main():
 
     ctx = UGMContext(offline_fixture=args.fixture)
     if args.dry_run:
+        safety_manager.set_dry_run_enforced(True)
         ctx.input_controller.dry_run_default = True
 
     server = create_server(ctx)

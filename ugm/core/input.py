@@ -34,16 +34,31 @@ class InputController:
         self,
         window_manager: WindowManager,
         dry_run_default: bool = False,
-        auto_focus: bool = True
+        auto_focus: bool = True,
+        enforce_dry_run: bool = False
     ):
         self.window_manager = window_manager
         self.dry_run_default = dry_run_default
         self.auto_focus = auto_focus
+        self.enforce_dry_run = enforce_dry_run
+
+    def is_dry_run_active(self, dry_run: Optional[bool] = None) -> bool:
+        """
+        Calculates effective dry-run state.
+        Server-wide dry-run (enforce_dry_run or safety_manager.is_dry_run_enforced)
+        CANNOT be overridden by an individual tool call passing dry_run=False.
+        """
+        if safety_manager.is_dry_run_enforced or self.enforce_dry_run:
+            return True
+        if dry_run is not None:
+            return bool(dry_run)
+        return self.dry_run_default
 
     def _resolve_screen_coords(
         self,
         norm_x: float,
-        norm_y: float
+        norm_y: float,
+        dry_run: Optional[bool] = None
     ) -> Tuple[int, int, WindowInfo]:
         """
         Validates normalized coordinates and converts them to absolute screen pixels
@@ -57,15 +72,22 @@ class InputController:
         if win is None:
             raise SafetyViolationError("No target game window selected. Cannot perform input.")
 
+        # Anti-cheat check
+        if win.process_name:
+            safety_manager.validate_process(win.process_name)
+
         if win.is_minimized:
             raise SafetyViolationError(f"Target game window '{win.title}' is minimized.")
 
         # Ensure window is focused if auto_focus is enabled
+        effective_dry_run = self.is_dry_run_active(dry_run)
         if self.auto_focus and not win.is_focused:
             focused = self.window_manager.focus_window(win.hwnd)
             if focused:
                 # Refresh window info
-                win = self.window_manager.get_window_info(win.hwnd)
+                win = self.window_manager.current_window or win
+            elif not effective_dry_run:
+                logger.warning("Could not focus target game window '%s'", win.title)
 
         # Map normalized [0, 1] to window client area
         screen_x = int(win.client_x + norm_x * win.client_width)
@@ -96,8 +118,8 @@ class InputController:
         Moves the mouse cursor to the target normalized coordinate and hovers for duration_ms.
         Returns (screen_x, screen_y, executed).
         """
-        is_dry_run = self.dry_run_default if dry_run is None else dry_run
-        screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y)
+        is_dry_run = self.is_dry_run_active(dry_run)
+        screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run)
 
         if is_dry_run:
             logger.info(
@@ -124,10 +146,10 @@ class InputController:
         Executes a safe DirectInput click at normalized coordinates within the game window.
         """
         t0 = time.perf_counter()
-        is_dry_run = self.dry_run_default if dry_run is None else dry_run
+        is_dry_run = self.is_dry_run_active(dry_run)
 
         try:
-            screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y)
+            screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run)
         except Exception as e:
             return ClickResult(
                 x_normalized=norm_x,
@@ -201,11 +223,14 @@ class InputController:
         """
         t0 = time.perf_counter()
         safety_manager.check_safety()
-        is_dry_run = self.dry_run_default if dry_run is None else dry_run
+        is_dry_run = self.is_dry_run_active(dry_run)
 
         win = self.window_manager.current_window
         if win is None:
             raise SafetyViolationError("No target game window selected. Cannot press keys.")
+
+        if win.process_name:
+            safety_manager.validate_process(win.process_name)
 
         if self.auto_focus and not win.is_focused:
             self.window_manager.focus_window(win.hwnd)

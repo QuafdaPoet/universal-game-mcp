@@ -32,6 +32,9 @@ data/
 
 # Logs, scratch & local artifacts
 *.log
+*.db
+*.db-wal
+*.db-shm
 .system_generated/
 scratch/
 .idea/

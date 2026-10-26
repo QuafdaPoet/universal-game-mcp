@@ -43,11 +43,13 @@ class TargetResolver:
         self,
         icon_detector: IconDetector,
         ocr_engine: BaseOCREngine,
-        verifier: ActionVerifier
+        verifier: ActionVerifier,
+        skill_packs: Optional[Dict[str, Any]] = None
     ):
         self.icon_detector = icon_detector
         self.ocr_engine = ocr_engine
         self.verifier = verifier
+        self.skill_packs: Dict[str, Any] = skill_packs or {}
 
     def resolve_target(
         self,
@@ -66,7 +68,27 @@ class TargetResolver:
         """
         Locates target element, rejects ambiguity, and verifies features.
         """
-        is_dry_run = self.verifier.input_controller.dry_run_default if dry_run is None else dry_run
+        is_dry_run = self.verifier.input_controller.is_dry_run_active(dry_run)
+
+        # Resolve selector definition from loaded skill packs if selector_id is provided
+        if selector_id and self.skill_packs:
+            for pack in self.skill_packs.values():
+                selectors_dict = getattr(pack, "selectors", {})
+                if selector_id in selectors_dict:
+                    sel = selectors_dict[selector_id]
+                    if not icon_name and getattr(sel, "template_file", None):
+                        icon_name = selector_id
+                    if not text_pattern and getattr(sel, "text_pattern", None):
+                        text_pattern = sel.text_pattern
+                    if not search_roi and getattr(sel, "search_roi", None):
+                        search_roi = sel.search_roi
+                    if getattr(sel, "threshold", None) is not None:
+                        threshold = sel.threshold
+                    if getattr(sel, "hover_verification", None):
+                        hover_verification = sel.hover_verification
+                    if getattr(sel, "expected_tooltip_contains", None):
+                        expected_tooltip = sel.expected_tooltip_contains
+                    break
         orig_h, orig_w = frame.shape[:2]
         candidates: List[TargetCandidate] = []
 
@@ -279,6 +301,8 @@ class TargetExecutor:
         Executes click on target and verifies that intended visual state change succeeded.
         """
         t0 = time.perf_counter()
+        effective_dry_run = self.input_controller.is_dry_run_active(dry_run)
+        win = self.input_controller.window_manager.current_window
 
         # Handle target resolution if provided
         if target_resolution is not None:
@@ -290,7 +314,7 @@ class TargetExecutor:
                     y_pixel=0,
                     button=button,
                     clicks=clicks,
-                    dry_run=dry_run,
+                    dry_run=effective_dry_run,
                     executed=False,
                     verification_passed=False,
                     reason=f"Action rejected: {target_resolution.reason}",
@@ -310,7 +334,7 @@ class TargetExecutor:
                 y_pixel=0,
                 button=button,
                 clicks=clicks,
-                dry_run=dry_run,
+                dry_run=effective_dry_run,
                 executed=False,
                 verification_passed=False,
                 reason="Coordinates could not be resolved and no target specified.",
@@ -319,7 +343,7 @@ class TargetExecutor:
             )
 
         # Step 1: Capture pre-action baseline
-        pre_frame = self.capture_manager.capture()
+        pre_frame = self.capture_manager.capture(window=win)
 
         # Step 2: Dispatch input click
         click_res = self.input_controller.click(
@@ -327,10 +351,10 @@ class TargetExecutor:
             norm_y=norm_y,
             button=button,
             clicks=clicks,
-            dry_run=dry_run
+            dry_run=effective_dry_run
         )
 
-        if dry_run or click_res.dry_run:
+        if effective_dry_run or click_res.dry_run:
             click_res.status = TargetStatus.SUCCESS.value
             click_res.verification_passed = True
             click_res.evidence = {"dry_run_simulated": True}
@@ -343,7 +367,7 @@ class TargetExecutor:
 
         # Step 3: Wait stabilization interval and capture post-action frame
         time.sleep(0.08)
-        post_frame = self.capture_manager.capture()
+        post_frame = self.capture_manager.capture(window=win)
 
         # Step 4: Verify state change
         ver_res = self.verifier.verify_selection(

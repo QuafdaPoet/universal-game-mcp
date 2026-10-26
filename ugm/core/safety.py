@@ -37,7 +37,7 @@ class SafetyManager:
                 cls._instance._is_stopped = False
                 cls._instance._stop_reason = ""
                 cls._instance._stop_time = 0.0
-                cls._instance._dry_run_default = False
+                cls._instance._dry_run_enforced = False
                 cls._instance._anti_cheat_blacklisted = [
                     "easyanticheat", "battleye", "vanguard", "ricochet", "vac",
                     "equ8", "beclient", "start_protected_game"
@@ -51,6 +51,19 @@ class SafetyManager:
     @property
     def stop_reason(self) -> str:
         return self._stop_reason
+
+    @property
+    def is_dry_run_enforced(self) -> bool:
+        return self._dry_run_enforced
+
+    def set_dry_run_enforced(self, enforced: bool = True) -> None:
+        """Enforces dry-run globally across all tools and inputs."""
+        with self._lock:
+            self._dry_run_enforced = enforced
+            if enforced:
+                logger.info("Global dry-run ENFORCED by SafetyManager.")
+            else:
+                logger.info("Global dry-run lifted by SafetyManager.")
 
     def trigger_emergency_stop(self, reason: str = "User requested emergency stop") -> dict[str, Any]:
         """Halts all input and execution immediately."""

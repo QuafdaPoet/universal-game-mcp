@@ -52,8 +52,9 @@ class ActionVerifier:
         """
         t0 = time.perf_counter()
 
+        win = self.input_controller.window_manager.current_window
         # Capture pre-hover baseline
-        pre_frame = self.capture_manager.capture()
+        pre_frame = self.capture_manager.capture(window=win)
         h, w = pre_frame.shape[:2]
 
         # Execute hover
@@ -65,7 +66,7 @@ class ActionVerifier:
         )
 
         # Capture post-hover frame
-        post_frame = self.capture_manager.capture()
+        post_frame = self.capture_manager.capture(window=win)
 
         # Find visual difference to isolate tooltip
         diff = cv2.absdiff(pre_frame, post_frame)
@@ -142,6 +143,14 @@ class ActionVerifier:
         Optionally verifies that expected text appears in the ROI.
         """
         t0 = time.perf_counter()
+        if pre_frame is None or post_frame is None:
+            return VerificationResult(
+                verified=False,
+                diff_ratio=0.0,
+                message="Verification failed: baseline pre_frame or post_frame is missing.",
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                details={"error": "missing_frame"}
+            )
         h, w = pre_frame.shape[:2]
 
         crop_pre = pre_frame
