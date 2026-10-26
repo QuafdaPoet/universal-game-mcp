@@ -258,10 +258,17 @@ class FixtureBackend(BaseCaptureBackend):
 
 class CaptureManager:
     """
-    Coordinates capture backends with automatic fallbacks and ROI extraction.
+    Coordinates capture backends with automatic viable fallbacks and ROI extraction.
+    Fallbacks prioritize live capture backends (BetterCam -> Win32GDI -> MSS) before
+    falling back to FixtureBackend.
     """
 
-    def __init__(self, backend_override: Optional[BaseCaptureBackend] = None):
+    def __init__(
+        self,
+        backend_override: Optional[BaseCaptureBackend] = None,
+        allow_fixture_fallback: bool = True
+    ):
+        self.allow_fixture_fallback = allow_fixture_fallback
         self._backend: BaseCaptureBackend
         if backend_override is not None:
             self._backend = backend_override
@@ -294,15 +301,43 @@ class CaptureManager:
             logger.debug("MSS not available: %s", e)
 
         # Ultimate fallback for tests/headless
-        logger.info("Defaulting to FixtureBackend (offline/headless mode)")
-        return FixtureBackend()
+        if self.allow_fixture_fallback:
+            logger.info("Defaulting to FixtureBackend (offline/headless mode)")
+            return FixtureBackend()
+        raise RuntimeError("No live screen capture backends available.")
+
+    def _try_next_viable_backend(self) -> Optional[BaseCaptureBackend]:
+        """Tries the next viable live capture backend before considering mock fixture."""
+        if isinstance(self._backend, BetterCamBackend):
+            if sys.platform == "win32":
+                try:
+                    logger.info("Falling back from BetterCam to Win32GdiBackend...")
+                    return Win32GdiBackend()
+                except Exception as e:
+                    logger.debug("Win32GDI fallback init failed: %s", e)
+            try:
+                logger.info("Falling back to MSSBackend...")
+                return MSSBackend()
+            except Exception as e:
+                logger.debug("MSS fallback init failed: %s", e)
+        elif isinstance(self._backend, Win32GdiBackend):
+            try:
+                logger.info("Falling back from Win32GdiBackend to MSSBackend...")
+                return MSSBackend()
+            except Exception as e:
+                logger.debug("MSS fallback init failed: %s", e)
+
+        if self.allow_fixture_fallback and not isinstance(self._backend, FixtureBackend):
+            logger.warning("All viable live capture backends failed. Falling back to FixtureBackend.")
+            return FixtureBackend()
+        return None
 
     @property
     def backend(self) -> BaseCaptureBackend:
         return self._backend
 
     def set_backend(self, backend: BaseCaptureBackend) -> None:
-        if self._backend is not None:
+        if self._backend is not None and self._backend is not backend:
             self._backend.release()
         self._backend = backend
 
@@ -313,19 +348,21 @@ class CaptureManager:
     ) -> np.ndarray:
         """
         Captures a frame from the target window and optional ROI.
+        Attempts viable live backends on failure before falling back to fixture.
         Caches the captured frame and timestamp.
         """
         t0 = time.perf_counter()
-        try:
-            frame = self._backend.capture(window=window, roi=roi)
-        except Exception as exc:
-            logger.warning("Preferred capture backend failed (%s). Falling back.", exc)
-            if not isinstance(self._backend, FixtureBackend):
-                # Switch to FixtureBackend if hardware capture fails
-                self.set_backend(FixtureBackend())
+        while True:
+            try:
                 frame = self._backend.capture(window=window, roi=roi)
-            else:
-                raise
+                break
+            except Exception as exc:
+                logger.warning("Capture backend %s failed (%s). Attempting viable fallback.", type(self._backend).__name__, exc)
+                next_backend = self._try_next_viable_backend()
+                if next_backend is not None:
+                    self.set_backend(next_backend)
+                else:
+                    raise RuntimeError(f"All viable capture backends failed. Last error: {exc}") from exc
 
         self._last_frame = frame
         self._last_capture_time = time.perf_counter() - t0

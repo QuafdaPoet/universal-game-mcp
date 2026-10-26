@@ -1,6 +1,6 @@
-# Hướng Dẫn Chi Tiết Plugin Adapter: Hearts of Iron IV (HOI4)
+# Hướng Dẫn Chi Tiết Game Skill Pack: Hearts of Iron IV (HOI4) - V1.5
 
-Plugin `ugm.adapters.hoi4` là adapter đầu tiên được tích hợp sẵn trong Universal Game MCP (UGM), phục vụ quan sát và điều khiển tựa game chiến thuật **Hearts of Iron IV** (Paradox Interactive).
+Trong kiến trúc Universal Game MCP V1.5, **Hearts of Iron IV** được triển khai dưới dạng **Game Skill Pack** độc lập tại thư mục `game_skills/hoi4/`, kết hợp cùng bộ máy nhận diện trạng thái UI, đồ thị điều hướng và bộ máy tự học.
 
 ---
 
@@ -21,30 +21,69 @@ Tất cả các vùng tọa độ được chuẩn hóa tỉ lệ `[0.0, 1.0]` t
 | `date_clock` | `[0.830, 0.0, 0.100, 0.045]` | Ngày tháng và đồng hồ thời gian |
 | `speed_controls` | `[0.930, 0.0, 0.070, 0.045]` | Nút tăng giảm tốc độ thời gian (1x - 5x) |
 | `pause_indicator`| `[0.850, 0.045, 0.080, 0.035]` | Biển báo trạng thái tạm dừng (PAUSED) màu đỏ |
-| `event_dialog` | `[0.280, 0.250, 0.440, 0.500]` | Hộp thoại thông báo sự kiện quốc tế / ngoại giao |
+| `drawer_panel` | `[0.0, 0.05, 0.35, 0.95]` | Ngăn kéo các bảng (Sản xuất, Nghiên cứu, Ngoại giao) |
 
 ---
 
-## ⌨️ Bảng Phím Tắt DirectInput Tích Hợp Sẵn
+## 🎯 Trạng Thái Giao Diện (UI States) Trong HOI4
 
-| Thao tác | Phím gửi | Ghi chú |
-|---|---|---|
-| Tạm dừng / Tiếp tục | `["space"]` | Phím cách dừng/chạy game |
-| Tăng tốc độ game | `["num+"]` | Tăng 1 nấc tốc độ |
-| Giảm tốc độ game | `["num-"]` | Giảm 1 nấc tốc độ |
-| Mở Nghiên cứu (Research) | `["w"]` | Bật cây công nghệ |
-| Mở Ngoại giao (Diplomacy) | `["e"]` | Danh sách quốc gia |
-| Mở Thương mại (Trade) | `["r"]` | Mua bán tài nguyên dầu mỏ, cao su, thép |
-| Mở Xây dựng (Construction)| `["t"]` | Xây nhà máy, công sự, radar |
-| Mở Sản xuất (Production) | `["y"]` | Dây chuyền sản xuất vũ khí, xe tăng, máy bay |
-| Đóng cửa sổ / Thoát menu | `["escape"]` | Hủy chọn hoặc đóng popup hiện tại |
+Bộ nhận diện `UIStateRecognizer` tự động phân loại giao diện HOI4 thành các trạng thái:
+1. `main_map`: Bản đồ chính (thanh topbar hiển thị đầy đủ, không có ngăn kéo mở).
+2. `production`: Bảng quản lý dây chuyền sản xuất quân sự và xưởng đóng tàu (phím tắt `y`).
+3. `construction`: Bảng xây dựng công trình, hạ tầng, nhà máy (phím tắt `t`).
+4. `research`: Bảng cây công nghệ và nghiên cứu khoa học (phím tắt `w`).
+5. `diplomacy`: Bảng danh sách quốc gia và ngoại giao (phím tắt `e`).
+6. `recruitment`: Bảng huấn luyện và biên chế sư đoàn (phím tắt `u`).
+7. `army_selected`: Khi một tập đoàn quân / tướng lĩnh được chọn (thanh chân dung tướng ở đáy màn hình).
+8. `unknown`: Giao diện chưa nhận dạng được hoặc màn hình tải / menu chính.
+
+Mỗi kết quả đều có độ tin cậy `confidence`, băm tri giác `phash`, bằng chứng quan sát `evidence` và trạng thái `known` / `ambiguous` / `unknown`.
 
 ---
 
-## 🔍 Bộ Icon Mẫu Nhận Diện Sẵn
-Adapter đi kèm các icon mẫu chuẩn nằm tại thư mục `ugm/adapters/hoi4/icons/`:
-- `civilian_factory.png`: Icon nhà máy dân sự.
-- `military_factory.png`: Icon nhà máy quân sự.
-- `political_power.png`: Biểu tượng chim đại bàng / vòng nguyệt quế.
-- `stability.png`: Biểu tượng cán cân công lý (Độ ổn định).
-- `pause_btn.png`: Hai vạch pause màu vàng trên nền đỏ.
+## 🧭 Đồ Thị Dẫn Đường (Navigation Graph) HOI4
+
+Đồ thị dẫn đường cho phép AI di chuyển giữa các trạng thái giao diện mà không cần click mò:
+
+```mermaid
+flowchart TD
+    main_map["main_map (Bản đồ chính)"]
+    prod["production (Bảng sản xuất)"]
+    cons["construction (Bảng xây dựng)"]
+    res["research (Bảng nghiên cứu)"]
+    diplo["diplomacy (Bảng ngoại giao)"]
+
+    main_map -->|"press_keys ['y']"| prod
+    prod -->|"press_keys ['escape']"| main_map
+    main_map -->|"press_keys ['t']"| cons
+    cons -->|"press_keys ['escape']"| main_map
+    main_map -->|"press_keys ['w']"| res
+    res -->|"press_keys ['escape']"| main_map
+    main_map -->|"press_keys ['e']"| diplo
+    diplo -->|"press_keys ['escape']"| main_map
+```
+
+AI gọi `navigate_to(target_state="production", game_id="hoi4")` để tự động thực thi chuyển đổi an toàn và xác minh kết quả sau thao tác.
+
+---
+
+## 🎮 Các Kỹ Năng Tuyển Chọn (Curated Game Skills)
+
+Thư mục `game_skills/hoi4/skills/` cung cấp các kỹ năng tuyển chọn có sẵn:
+1. `pause_unpause`: Gửi phím cách (`space`) để tạm dừng / tiếp tục mô phỏng; xác minh sự xuất hiện/biến mất của biển báo `PAUSED`.
+2. `open_production`: Nhấn phím `y` để mở bảng sản xuất; xác minh bằng OCR từ khóa `"Production"`.
+3. `increase_speed`: Nhấn phím `num+` để tăng tốc độ game; xác minh thay đổi chỉ số tốc độ.
+4. `select_army_group`: Định vị chân dung chỉ huy tập đoàn quân và click chọn; xác minh vùng thanh quân sự phía dưới.
+
+> [!IMPORTANT]
+> Các kỹ năng tuyển chọn này được bảo vệ nguyên vẹn (Curated Protection). Khi AI phát hiện thao tác mới, hệ thống sẽ lưu vào bộ nhớ bền vững dưới dạng kỹ năng ứng viên (`candidate`), không bao giờ ghi đè trực tiếp lên các tệp trong `game_skills/`.
+
+---
+
+## 💻 Trích Xuất Tài Nguyên Game (Game Asset Indexer)
+
+UGM V1.5 tích hợp công cụ `index_game_assets` giúp đọc trực tiếp các tệp `.gui`, `.gfx`, `.yml` từ thư mục cài đặt Hearts of Iron IV của người dùng:
+- Trích xuất tên các sprite giao diện (`spriteType`).
+- Trích xuất cấu trúc cửa sổ giao diện (`windowType`).
+- Trích xuất từ khóa bản địa hóa (localization keys).
+- **Hoàn toàn an toàn**: Chỉ đọc (read-only), không sửa file, không can thiệp bộ nhớ tiến trình game.
