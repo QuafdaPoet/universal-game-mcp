@@ -18,7 +18,7 @@ class EmergencyStopTriggered(Exception):
     pass
 
 
-class SafetyViolationError(Exception):
+class SafetyViolationError(ValueError):
     """Raised when an operation violates containment or safety boundaries."""
     pass
 
@@ -40,7 +40,9 @@ class SafetyManager:
                 cls._instance._dry_run_enforced = False
                 cls._instance._anti_cheat_blacklisted = [
                     "easyanticheat", "battleye", "vanguard", "ricochet", "vac",
-                    "equ8", "beclient", "start_protected_game"
+                    "equ8", "beclient", "start_protected_game",
+                    "vgc.exe", "beservice.exe", "easyanticheat.exe", "faceit.exe",
+                    "vgc", "beservice", "faceit", "punkbuster", "pnkbstr"
                 ]
             return cls._instance
 
@@ -98,6 +100,65 @@ class SafetyManager:
                 f"Action blocked: Emergency stop is active (Reason: {self._stop_reason})"
             )
 
+    def scan_system_processes(self) -> list[str]:
+        """
+        Scans running system processes using psutil if available.
+        Returns list of detected blacklisted process names.
+        Gracefully catches ImportError, psutil.AccessDenied, psutil.NoSuchProcess,
+        and OSError without crashing.
+        If blacklisted processes are detected, triggers emergency stop and raises SafetyViolationError.
+        """
+        detected: list[str] = []
+        try:
+            import psutil
+            if psutil is None:
+                return detected
+        except (ImportError, NameError):
+            logger.debug("psutil is not installed; skipping system process scan.")
+            return detected
+
+        try:
+            for proc in psutil.process_iter(['name']):
+                try:
+                    name = None
+                    if getattr(proc, 'info', None) and 'name' in proc.info:
+                        name = proc.info['name']
+                    if not name and hasattr(proc, 'name'):
+                        name = proc.name()
+                    if not name:
+                        continue
+                    name_lower = str(name).lower()
+                    for blacklisted in self._anti_cheat_blacklisted:
+                        b_lower = blacklisted.lower()
+                        if b_lower in name_lower or name_lower == b_lower:
+                            detected.append(str(name))
+                            break
+                except (getattr(psutil, 'NoSuchProcess', Exception),
+                        getattr(psutil, 'AccessDenied', Exception),
+                        getattr(psutil, 'ZombieProcess', Exception),
+                        OSError):
+                    continue
+                except Exception as e:
+                    logger.debug("Error inspecting individual process: %s", e)
+                    continue
+        except (getattr(psutil, 'AccessDenied', Exception), OSError) as e:
+            logger.debug("psutil process_iter restricted: %s", e)
+            return detected
+        except Exception as e:
+            logger.debug("Unexpected error during system process scan: %s", e)
+            return detected
+
+        if detected:
+            proc_str = ", ".join(detected)
+            self.trigger_emergency_stop(
+                f"Blocked anti-cheat protected process(es) running in system: {proc_str}. UGM only supports offline games."
+            )
+            raise SafetyViolationError(
+                f"Security policy violation: Detected running anti-cheat process(es): {proc_str}."
+            )
+
+        return detected
+
     def validate_process(self, process_name: str) -> None:
         """
         Ensures the game process is not protected by an online anti-cheat engine.
@@ -105,13 +166,17 @@ class SafetyManager:
         """
         proc_lower = process_name.lower()
         for blacklisted in self._anti_cheat_blacklisted:
-            if blacklisted in proc_lower:
+            b_lower = blacklisted.lower()
+            if b_lower in proc_lower or proc_lower == b_lower:
                 self.trigger_emergency_stop(
                     f"Blocked anti-cheat protected process: {process_name}. UGM only supports offline games."
                 )
                 raise SafetyViolationError(
                     f"Security policy violation: Detected anti-cheat '{blacklisted}' in '{process_name}'."
                 )
+
+        # Defense-in-depth: scan background system processes
+        self.scan_system_processes()
 
     def validate_normalized_coordinates(self, x: float, y: float) -> None:
         """Validates that coordinates are safely normalized [0.0, 1.0]."""

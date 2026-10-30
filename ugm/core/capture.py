@@ -16,6 +16,7 @@ import numpy as np
 import cv2
 
 from .types import WindowInfo, NormalizedRect, BoundingBox
+from .safety import SafetyViolationError
 
 logger = logging.getLogger("ugm.capture")
 
@@ -263,12 +264,16 @@ class CaptureManager:
     falling back to FixtureBackend.
     """
 
+    DEFAULT_CAPTURE_DIR: str = "data/captures"
+
     def __init__(
         self,
         backend_override: Optional[BaseCaptureBackend] = None,
-        allow_fixture_fallback: bool = True
+        allow_fixture_fallback: bool = True,
+        capture_dir: str = "data/captures"
     ):
         self.allow_fixture_fallback = allow_fixture_fallback
+        self.capture_dir = os.path.abspath(capture_dir) if capture_dir else os.path.abspath(self.DEFAULT_CAPTURE_DIR)
         self._backend: BaseCaptureBackend
         if backend_override is not None:
             self._backend = backend_override
@@ -384,9 +389,55 @@ class CaptureManager:
             raise ValueError("Could not encode image to PNG")
         return base64.b64encode(encoded.tobytes()).decode("utf-8")
 
-    @staticmethod
-    def save_image(image: np.ndarray, file_path: str) -> str:
-        """Saves an image to disk and ensures parent directories exist."""
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        cv2.imwrite(file_path, image)
-        return os.path.abspath(file_path)
+    @classmethod
+    def _save_image_impl(
+        cls,
+        image: np.ndarray,
+        file_path: str,
+        effective_base: str
+    ) -> str:
+        if not file_path or not isinstance(file_path, str) or not file_path.strip():
+            raise ValueError("file_path must be a non-empty string.")
+
+        canonical_base = os.path.realpath(os.path.abspath(effective_base))
+
+        if os.path.isabs(file_path):
+            candidate_path = os.path.realpath(os.path.abspath(file_path))
+        else:
+            candidate_path = os.path.realpath(os.path.abspath(os.path.join(canonical_base, file_path)))
+
+        try:
+            common = os.path.commonpath([canonical_base, candidate_path])
+        except ValueError as exc:
+            # Cross-drive or incompatible paths on Windows
+            raise SafetyViolationError(
+                f"Path traversal detected: '{file_path}' escapes sandbox '{canonical_base}'"
+            ) from exc
+
+        if common != canonical_base or candidate_path == canonical_base:
+            raise SafetyViolationError(
+                f"Path traversal detected: '{file_path}' escapes sandbox '{canonical_base}'"
+            )
+
+        os.makedirs(os.path.dirname(candidate_path), exist_ok=True)
+        success = cv2.imwrite(candidate_path, image)
+        if not success:
+            raise IOError(f"Failed to write image to '{candidate_path}'")
+        return candidate_path
+
+    class _SaveImageCallable:
+        """Descriptor enabling save_image to be invoked as an instance method or static method."""
+        def __get__(self, instance: Optional[CaptureManager], owner: Optional[type] = None):
+            if instance is None:
+                def _static_save(image: np.ndarray, file_path: str, base_dir: Optional[str] = None) -> str:
+                    default_base = getattr(owner, "DEFAULT_CAPTURE_DIR", "data/captures")
+                    target_base = base_dir if base_dir is not None else default_base
+                    return CaptureManager._save_image_impl(image, file_path, target_base)
+                return _static_save
+            else:
+                def _instance_save(image: np.ndarray, file_path: str, base_dir: Optional[str] = None) -> str:
+                    target_base = base_dir if base_dir is not None else getattr(instance, "capture_dir", "data/captures")
+                    return CaptureManager._save_image_impl(image, file_path, target_base)
+                return _instance_save
+
+    save_image = _SaveImageCallable()

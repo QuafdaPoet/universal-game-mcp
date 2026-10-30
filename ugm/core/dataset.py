@@ -6,6 +6,7 @@ Disabled by default to protect user privacy. All stored samples are excluded fro
 
 from __future__ import annotations
 import os
+import re
 import time
 import json
 import uuid
@@ -15,6 +16,7 @@ import numpy as np
 import cv2
 
 from .types import NormalizedRect
+from .safety import SafetyViolationError
 
 logger = logging.getLogger("ugm.dataset")
 
@@ -51,7 +53,18 @@ class DatasetCollector:
     ) -> Dict[str, Any]:
         """
         Saves a training sample and JSON metadata if collection is enabled.
+        Sanitizes tag to prevent directory traversal and verifies containment within storage_dir.
         """
+        if not tag or not isinstance(tag, str):
+            raise ValueError("Dataset sample tag must be a non-empty string.")
+
+        # Sanitize tag: strip navigation characters, slashes, and non-alphanumeric/underscore/hyphen
+        sanitized_tag = re.sub(r"[\/\\:]+|\.\.+", "", tag).strip()
+        sanitized_tag = re.sub(r"[^a-zA-Z0-9_-]", "", sanitized_tag)
+
+        if not sanitized_tag:
+            raise ValueError("Dataset sample tag cannot be empty after sanitization")
+
         if not self.enabled and not force:
             return {
                 "saved": False,
@@ -78,14 +91,24 @@ class DatasetCollector:
                 "height": roi.height,
             }
 
-        img_filename = f"{sample_id}_{tag}.png"
-        json_filename = f"{sample_id}_{tag}.json"
+        canonical_storage = os.path.realpath(os.path.abspath(self.storage_dir))
+        img_filename = f"{sample_id}_{sanitized_tag}.png"
+        json_filename = f"{sample_id}_{sanitized_tag}.json"
 
-        img_path = os.path.join(self.storage_dir, img_filename)
-        json_path = os.path.join(self.storage_dir, json_filename)
+        target_img_path = os.path.realpath(os.path.abspath(os.path.join(canonical_storage, img_filename)))
+        target_json_path = os.path.realpath(os.path.abspath(os.path.join(canonical_storage, json_filename)))
+
+        try:
+            common_img = os.path.commonpath([canonical_storage, target_img_path])
+            common_json = os.path.commonpath([canonical_storage, target_json_path])
+        except ValueError as exc:
+            raise SafetyViolationError(f"Path traversal detected in tag '{tag}'") from exc
+
+        if common_img != canonical_storage or common_json != canonical_storage:
+            raise SafetyViolationError(f"Path traversal detected in tag '{tag}'")
 
         # Write image
-        cv2.imwrite(img_path, crop_img)
+        cv2.imwrite(target_img_path, crop_img)
 
         # Sanitize metadata (remove credentials, system tokens)
         clean_meta = {}
@@ -97,7 +120,7 @@ class DatasetCollector:
 
         record = {
             "sample_id": sample_id,
-            "tag": tag,
+            "tag": sanitized_tag,
             "timestamp": time.time(),
             "datetime": time.strftime("%Y-%m-%d %H:%M:%S"),
             "image_file": img_filename,
@@ -106,16 +129,16 @@ class DatasetCollector:
             "metadata": clean_meta,
         }
 
-        with open(json_path, "w", encoding="utf-8") as f:
+        with open(target_json_path, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
 
-        logger.info("Saved dataset sample: %s (%s)", sample_id, tag)
+        logger.info("Saved dataset sample: %s (%s)", sample_id, sanitized_tag)
 
         return {
             "saved": True,
             "sample_id": sample_id,
-            "tag": tag,
-            "image_path": img_path,
-            "metadata_path": json_path,
+            "tag": sanitized_tag,
+            "image_path": target_img_path,
+            "metadata_path": target_json_path,
             "dimensions": f"{crop_img.shape[1]}x{crop_img.shape[0]}",
         }

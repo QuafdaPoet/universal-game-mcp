@@ -31,6 +31,7 @@ class GameAssetIndexer:
     """
     Safe, read-only game asset parser and indexer for HOI4 and Clausewitz engine titles.
     """
+    GAME_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
     def __init__(self, cache_dir: str = "data/asset_index"):
         self.cache_dir = os.path.abspath(cache_dir)
@@ -45,6 +46,9 @@ class GameAssetIndexer:
         Scans interface/*.gui, interface/*.gfx, and localisation/*.yml in game_path.
         Extracts sprite names, window IDs, and localization entries into local cache.
         """
+        if not game_id or not isinstance(game_id, str) or not self.GAME_ID_PATTERN.match(game_id):
+            raise ValueError(f"Invalid game_id '{game_id}'. Must match ^[a-zA-Z0-9_-]+$")
+
         if not os.path.exists(game_path):
             return {
                 "success": False,
@@ -76,7 +80,15 @@ class GameAssetIndexer:
                         self._parse_yml_loc(full_p, loc_keys)
 
         # Write index summary to disk
-        cache_file = os.path.join(self.cache_dir, f"{game_id}_asset_index.json")
+        canonical_cache_dir = os.path.realpath(os.path.abspath(self.cache_dir))
+        cache_file = os.path.realpath(os.path.abspath(os.path.join(canonical_cache_dir, f"{game_id}_asset_index.json")))
+        try:
+            common = os.path.commonpath([canonical_cache_dir, cache_file])
+        except ValueError as exc:
+            raise ValueError(f"Path traversal detected in cache_file for game_id '{game_id}'") from exc
+
+        if common != canonical_cache_dir:
+            raise ValueError(f"Path traversal detected in cache_file for game_id '{game_id}'")
         index_data = {
             "game_id": game_id,
             "game_path": os.path.abspath(game_path),

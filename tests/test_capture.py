@@ -32,7 +32,7 @@ def test_capture_manager_base64_and_save(tmp_path):
     backend = FixtureBackend()
     backend.load_from_file("tests/fixtures/hoi4_topbar.png")
 
-    manager = CaptureManager(backend_override=backend)
+    manager = CaptureManager(backend_override=backend, capture_dir=str(tmp_path))
     frame = manager.capture()
 
     assert frame is not None

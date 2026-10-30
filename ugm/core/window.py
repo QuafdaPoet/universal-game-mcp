@@ -80,35 +80,45 @@ class WindowManager:
         matches: List[Tuple[int, str, str, int]] = []
 
         def enum_windows_callback(hwnd: int, _extra: None) -> bool:
-            if not win32gui.IsWindowVisible(hwnd):
-                return True
-            title = win32gui.GetWindowText(hwnd).strip()
-            if not title:
-                return True
-
             try:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                pname = psutil.Process(pid).name()
-            except Exception:
-                pname = ""
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+                title = win32gui.GetWindowText(hwnd).strip()
+                if not title:
+                    return True
 
-            title_matched = False
-            if window_title:
-                if re.search(window_title, title, re.IGNORECASE):
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    pname = psutil.Process(pid).name()
+                except Exception:
+                    pname = ""
+
+                title_matched = False
+                if window_title:
+                    try:
+                        pattern = re.escape(window_title)
+                        if re.search(pattern, title, re.IGNORECASE):
+                            title_matched = True
+                    except re.error:
+                        # Fallback to case-insensitive literal substring match
+                        if window_title.lower() in title.lower():
+                            title_matched = True
+                else:
                     title_matched = True
-            else:
-                title_matched = True
 
-            proc_matched = False
-            if process_name:
-                if process_name.lower() in pname.lower():
+                proc_matched = False
+                if process_name:
+                    if process_name.lower() in pname.lower():
+                        proc_matched = True
+                else:
                     proc_matched = True
-            else:
-                proc_matched = True
 
-            if title_matched and proc_matched:
-                matches.append((hwnd, title, pname, pid))
-            return True
+                if title_matched and proc_matched:
+                    matches.append((hwnd, title, pname, pid))
+                return True
+            except Exception as e:
+                logger.debug("Exception in enum_windows_callback for hwnd %s: %s", hwnd, e)
+                return True
 
         win32gui.EnumWindows(enum_windows_callback, None)
 
