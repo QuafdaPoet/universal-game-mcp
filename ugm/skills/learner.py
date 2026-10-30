@@ -145,6 +145,39 @@ class SkillLearner:
         logger.info("Skill '%s' status updated to REJECTED (reason: %s).", skill_id, reason)
         return True
 
+    def mark_skill_suspect(self, skill_id: str, reason: str = "") -> bool:
+        """Marks a previously verified skill as 'suspect' following unexpected failures."""
+        skill = self.storage.get_learned_skill(skill_id)
+        if not skill:
+            return False
+        conn = self.storage.db.get_connection()
+        with conn:
+            conn.execute("UPDATE learned_skills SET status = 'suspect', updated_at = unixepoch('subsec') WHERE skill_id = ?", (skill_id,))
+        logger.info("Skill '%s' status updated to SUSPECT (reason: %s).", skill_id, reason)
+        return True
+
+    def optimize_skill(
+        self,
+        skill_id: str,
+        new_steps: List[Dict[str, Any]],
+        rationale: str = "",
+        new_version: Optional[str] = None
+    ) -> bool:
+        """Optimizes a skill with a refined sequence of steps and version bump."""
+        # Validate action primitives
+        for idx, step in enumerate(new_steps):
+            act = step.get("action")
+            if act not in ALLOWLISTED_ACTION_PRIMITIVES:
+                raise SafetyViolationError(
+                    f"Optimized step {idx + 1} has disallowed action primitive '{act}'."
+                )
+        return self.storage.optimize_learned_skill(
+            skill_id=skill_id,
+            new_steps=new_steps,
+            rationale=rationale,
+            new_version=new_version
+        )
+
     def delete_skill(self, skill_id: str) -> bool:
         """Deletes a learned skill entry."""
         return self.storage.delete_learned_skill(skill_id)

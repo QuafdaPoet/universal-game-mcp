@@ -30,10 +30,13 @@ logger = logging.getLogger("ugm.skills.engine")
 
 ALLOWLISTED_ACTION_PRIMITIVES = {
     "press_keys",
+    "press_key",
     "click_target",
+    "click",
     "locate_and_click",
     "click_selector",
     "hover",
+    "hover_target",
     "wait",
     "verify_state"
 }
@@ -339,8 +342,8 @@ class SkillExecutionEngine:
         t0 = time.perf_counter()
 
         try:
-            if action == "press_keys":
-                keys = merged_params.get("keys", [])
+            if action in ("press_keys", "press_key"):
+                keys = merged_params.get("keys") or ([merged_params["key"]] if "key" in merged_params else [])
                 duration = merged_params.get("duration_ms", 50)
                 res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
                 succ = res.success if hasattr(res, "success") else (res.get("success", res.get("executed", True)) if isinstance(res, dict) else True)
@@ -400,7 +403,7 @@ class SkillExecutionEngine:
                     evidence=click_res.evidence
                 )
 
-            elif action == "click_target":
+            elif action in ("click_target", "click"):
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 btn = merged_params.get("button", "left")
@@ -420,7 +423,7 @@ class SkillExecutionEngine:
                     evidence={"coords": (nx, ny)}
                 )
 
-            elif action == "hover":
+            elif action in ("hover", "hover_target"):
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 dur = int(merged_params.get("duration_ms", 250))
