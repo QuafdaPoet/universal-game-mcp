@@ -8,7 +8,7 @@ and replans or stops safely on failure without blindly proceeding.
 from __future__ import annotations
 import time
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 
 from .recognizer import UIStateRecognizer, UIStateDetection
