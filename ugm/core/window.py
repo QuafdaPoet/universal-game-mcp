@@ -40,6 +40,12 @@ class WindowManager:
         self._mock_window = mock
         self._current_window = mock
 
+    def attach_window(self, win: Optional[WindowInfo]) -> None:
+        """Sets the active window and updates mock reference if in mock/headless mode."""
+        self._current_window = win
+        if self._mock_window is not None or sys.platform != "win32":
+            self._mock_window = win
+
     @property
     def current_window(self) -> Optional[WindowInfo]:
         if self._mock_window is not None:
@@ -66,8 +72,18 @@ class WindowManager:
         Locates a game window matching title regex/substring or process executable name.
         """
         if self._mock_window is not None:
-            self._current_window = self._mock_window
-            return self._mock_window
+            matches_title = True
+            matches_proc = True
+            if window_title:
+                matches_title = bool(self._mock_window.title and window_title.lower() in self._mock_window.title.lower())
+            if process_name:
+                matches_proc = bool(self._mock_window.process_name and process_name.lower() in self._mock_window.process_name.lower())
+
+            if matches_title and matches_proc:
+                self._current_window = self._mock_window
+                return self._mock_window
+            elif sys.platform != "win32":
+                return None
 
         if sys.platform != "win32":
             logger.warning("Native window management is only supported on Windows.")

@@ -30,10 +30,13 @@ logger = logging.getLogger("ugm.skills.engine")
 
 ALLOWLISTED_ACTION_PRIMITIVES = {
     "press_keys",
+    "press_key",
     "click_target",
+    "click",
     "locate_and_click",
     "click_selector",
     "hover",
+    "hover_target",
     "wait",
     "verify_state"
 }
@@ -199,6 +202,23 @@ class SkillExecutionEngine:
         preconditions = skill_data.get("preconditions", {})
         post_verification = skill_data.get("post_verification", {})
 
+        if skill_data.get("status") == "rejected":
+            return SkillExecutionResult(
+                skill_id=skill_id,
+                game_id=resolved_game_id,
+                success=False,
+                status="rejected",
+                preconditions_met=False,
+                steps_executed=0,
+                steps_total=len(steps),
+                post_verification_passed=False,
+                dry_run=effective_dry_run,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"Skill '{skill_id}' has been REJECTED in knowledge lifecycle and cannot be executed.",
+                step_logs=[],
+                evidence={"status": "rejected"}
+            )
+
         # Step 2: Validate Action Primitives & Completeness
         for s in steps:
             action_name = s.get("action")
@@ -268,6 +288,8 @@ class SkillExecutionEngine:
             if not step_res.success:
                 latency = (time.perf_counter() - t0) * 1000.0
                 self._record_execution_history(resolved_game_id, skill_id, success=False, reason=step_res.message, duration_ms=latency, source="live" if not effective_dry_run else "synthetic_fixture")
+                if self.storage and not skill_data.get("is_curated"):
+                    self.storage.update_skill_stats(skill_id, success=False, is_execution_error=True, reason=step_res.message)
                 return SkillExecutionResult(
                     skill_id=skill_id,
                     game_id=resolved_game_id,
@@ -305,7 +327,7 @@ class SkillExecutionEngine:
 
         # Update stats if this is a learned skill
         if self.storage and not skill_data.get("is_curated"):
-            self.storage.update_skill_stats(skill_id, success=final_success)
+            self.storage.update_skill_stats(skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg)
 
         return SkillExecutionResult(
             skill_id=skill_id,
@@ -339,8 +361,8 @@ class SkillExecutionEngine:
         t0 = time.perf_counter()
 
         try:
-            if action == "press_keys":
-                keys = merged_params.get("keys", [])
+            if action in ("press_keys", "press_key"):
+                keys = merged_params.get("keys") or ([merged_params["key"]] if "key" in merged_params else [])
                 duration = merged_params.get("duration_ms", 50)
                 res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
                 succ = res.success if hasattr(res, "success") else (res.get("success", res.get("executed", True)) if isinstance(res, dict) else True)
@@ -400,7 +422,7 @@ class SkillExecutionEngine:
                     evidence=click_res.evidence
                 )
 
-            elif action == "click_target":
+            elif action in ("click_target", "click"):
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 btn = merged_params.get("button", "left")
@@ -420,7 +442,7 @@ class SkillExecutionEngine:
                     evidence={"coords": (nx, ny)}
                 )
 
-            elif action == "hover":
+            elif action in ("hover", "hover_target"):
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 dur = int(merged_params.get("duration_ms", 250))

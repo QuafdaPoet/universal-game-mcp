@@ -6,7 +6,7 @@ Defines typed models for windows, coordinates, OCR, icon detection, inputs, and 
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class MatchMethod(str, Enum):

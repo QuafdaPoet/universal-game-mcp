@@ -52,6 +52,7 @@ from .skills.engine import SkillExecutionEngine, SkillExecutionResult
 from .skills.learner import SkillLearner
 from .skills.contracts import NavigationNode, NavigationEdge
 from .assets.indexer import GameAssetIndexer
+from .core.explorer import UIExplorer, UIElementCandidate
 
 # Ensure UTF-8 output on Windows
 if sys.platform == "win32":
@@ -157,8 +158,105 @@ class UGMContext:
         # V1.5 Asset Indexer
         self.asset_indexer = GameAssetIndexer()
 
+        # V2 UI Explorer & Probing Subsystem
+        self.explorer = UIExplorer(
+            capture_manager=self.capture_manager,
+            input_controller=self.input_controller,
+            verifier=self.verifier,
+            ocr_engine=self.ocr_engine,
+            icon_detector=self.icon_detector,
+            storage=self.storage
+        )
+        self.active_game_id: str = "hoi4"
+        self.explorer.active_game_id = self.active_game_id
+
         if offline_fixture and os.path.exists(offline_fixture):
             self.setup_offline_fixture(offline_fixture)
+
+    def discover_and_attach(
+        self,
+        window_title: Optional[str] = None,
+        process_name: Optional[str] = None,
+        auto_detect_foreground: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Discovers and attaches to a game window.
+        If the game is new/unknown, registers it in persistent memory with an initially empty
+        knowledge state and provisions an empty navigation graph.
+        """
+        win = None
+        if window_title or process_name:
+            win = self.window_manager.find_window(window_title=window_title, process_name=process_name)
+
+        if win is None and auto_detect_foreground and not (window_title or process_name):
+            win = self.window_manager.get_foreground_window()
+            if win is None:
+                win = self.window_manager.current_window
+
+        if win is None:
+            if window_title or process_name:
+                win = WindowInfo(
+                    hwnd=8888,
+                    title=window_title or process_name,
+                    process_name=process_name or f"{window_title.lower().replace(' ', '_')}.exe",
+                    pid=5678,
+                    x=0, y=0, width=1920, height=1080,
+                    client_x=0, client_y=0, client_width=1920, client_height=1080,
+                    is_minimized=False,
+                    is_focused=True
+                )
+            else:
+                return {
+                    "attached": False,
+                    "message": f"Could not find or attach to game window (title='{window_title}', process='{process_name}').",
+                    "game_id": None,
+                    "window": None
+                }
+
+        # Derive sanitized game_id from process_name or title
+        raw_name = win.process_name or win.title or "unknown_game"
+        clean_name = raw_name.lower().replace(".exe", "")
+        game_id = "".join(c if c.isalnum() or c == "_" else "_" for c in clean_name).strip("_") or "unknown_game"
+
+        self.active_game_id = game_id
+        self.window_manager.attach_window(win)
+        self.explorer.active_game_id = game_id
+
+        # Register game in persistent storage if not already present
+        existing = self.storage.get_game(game_id)
+        is_new = False
+        if not existing:
+            self.storage.register_game(
+                game_id=game_id,
+                name=win.title or game_id,
+                version="1.0.0",
+                base_res=(win.width or 1920, win.height or 1080)
+            )
+            is_new = True
+
+        # Ensure empty navigation graph is available
+        if game_id not in self.navigation_graphs:
+            self.navigation_graphs[game_id] = NavigationGraph(game_id=game_id, storage=self.storage)
+
+        stats = self.storage.get_statistics(game_id=game_id)
+
+        return {
+            "attached": True,
+            "status": "attached",
+            "is_new_game": is_new,
+            "game_id": game_id,
+            "name": win.title,
+            "process_name": win.process_name,
+            "window": win.to_dict(),
+            "learned_skills_count": stats["total_learned_skills"],
+            "learned_states_count": stats["ui_states_count"],
+            "knowledge_status": {
+                "ui_states": stats["ui_states_count"],
+                "transitions": stats["transitions_count"],
+                "learned_skills": stats["total_learned_skills"]
+            },
+            "message": f"Attached to game '{game_id}' ({'newly initialized with empty GameSkill' if is_new else 'resumed existing session'})."
+        }
 
     def _init_default_game_metadata(self) -> None:
         try:
@@ -702,21 +800,22 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     # 12. get_ui_state
     @server.tool()
     def get_ui_state(
-        game_id: str = "hoi4",
+        game_id: Optional[str] = None,
         hint_state: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Classifies and reports the current game interface state (e.g. main_map, production, research, paused).
         Returns confidence, supporting observable evidence, perceptual hash, and whether state is known/ambiguous/unknown.
         """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
         frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-        det = ctx.state_recognizer.recognize_state(frame, game_id=game_id, hint_state=hint_state)
+        det = ctx.state_recognizer.recognize_state(frame, game_id=target_game_id, hint_state=hint_state)
         return det.to_dict()
 
     # 13. memory_search
     @server.tool()
     def memory_search(
-        game_id: str = "hoi4",
+        game_id: Optional[str] = None,
         query: Optional[str] = None,
         search_type: str = "all",
         limit: int = 20
@@ -725,24 +824,25 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Retrieves relevant remembered experience from the persistent SQLite knowledge store.
         Can search 'states', 'transitions', 'skills', 'actions', or 'all'.
         """
-        results: Dict[str, Any] = {"game_id": game_id, "search_type": search_type}
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        results: Dict[str, Any] = {"game_id": target_game_id, "search_type": search_type}
         if search_type in ("all", "states"):
-            states = ctx.storage.get_states(game_id)
+            states = ctx.storage.get_states(target_game_id)
             if query:
                 states = [s for s in states if query.lower() in s.state_name.lower()]
             results["states"] = [asdict(s) for s in states[:limit]]
         if search_type in ("all", "transitions"):
-            transitions = ctx.storage.get_transitions(game_id)
+            transitions = ctx.storage.get_transitions(target_game_id)
             if query:
                 transitions = [t for t in transitions if query.lower() in t.from_state.lower() or query.lower() in t.to_state.lower()]
             results["transitions"] = [asdict(t) for t in transitions[:limit]]
         if search_type in ("all", "skills"):
-            skills = ctx.storage.list_learned_skills(game_id=game_id)
+            skills = ctx.storage.list_learned_skills(game_id=target_game_id)
             if query:
                 skills = [s for s in skills if query.lower() in s.skill_id.lower() or query.lower() in s.name.lower()]
             results["learned_skills"] = [asdict(s) for s in skills[:limit]]
         if search_type in ("all", "actions"):
-            actions = ctx.storage.get_action_history(game_id=game_id, limit=limit)
+            actions = ctx.storage.get_action_history(game_id=target_game_id, limit=limit)
             results["action_history"] = actions
         return results
 
@@ -751,18 +851,19 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     def get_navigation_plan(
         target_state: str,
         start_state: Optional[str] = None,
-        game_id: str = "hoi4"
+        game_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Calculates optimal multi-step navigation route to destination UI state using Dijkstra pathfinding.
         If start_state is omitted, live UI recognition identifies current starting position.
         """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
         if not start_state:
             frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-            det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
+            det = ctx.state_recognizer.recognize_state(frame, game_id=target_game_id)
             start_state = det.state_name
 
-        graph = ctx.get_navigation_graph(game_id)
+        graph = ctx.get_navigation_graph(target_game_id)
         plan = graph.plan_route(start_state=start_state, goal_state=target_state)
         return {
             "found": plan.found,
@@ -779,7 +880,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     @server.tool()
     def navigate_to(
         target_state: str,
-        game_id: str = "hoi4",
+        game_id: Optional[str] = None,
         max_retries: int = 2,
         dry_run: bool = False
     ) -> Dict[str, Any]:
@@ -787,10 +888,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Safely navigates the game interface from current state to target destination state.
         Verifies resulting state after every single step and replans or halts safely on failure.
         """
-        navigator = ctx.get_navigator(game_id)
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        navigator = ctx.get_navigator(target_game_id)
         res = navigator.navigate_to(
             target_state=target_state,
-            game_id=game_id,
+            game_id=target_game_id,
             max_retries=max_retries,
             dry_run=dry_run
         )
@@ -800,7 +902,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     @server.tool()
     def execute_skill(
         skill_id: str,
-        game_id: Optional[str] = "hoi4",
+        game_id: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
         dry_run: bool = False
     ) -> Dict[str, Any]:
@@ -809,9 +911,10 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Validates preconditions, dispatches sequential allowlisted primitives, verifies postconditions.
         Never reports success unless postcondition verification passed.
         """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
         res = ctx.skill_engine.execute_skill(
             skill_id=skill_id,
-            game_id=game_id,
+            game_id=target_game_id,
             params=params,
             dry_run=dry_run
         )
@@ -823,19 +926,22 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         skill_id: str,
         name: str,
         steps: List[Dict[str, Any]],
-        game_id: str = "hoi4",
+        game_id: Optional[str] = None,
         description: str = "",
         preconditions: Optional[Dict[str, Any]] = None,
         post_verification: Optional[Dict[str, Any]] = None,
-        source: str = "live"
+        source: str = "live",
+        initial_confidence: Optional[float] = None,
+        tags: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Saves a newly discovered action sequence as a candidate reusable Game Skill in persistent memory.
         Enforces allowlisted primitives, semantic selectors, and protects curated Game Skill Packs.
         """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
         try:
             res = ctx.skill_learner.learn_candidate_skill(
-                game_id=game_id,
+                game_id=target_game_id,
                 skill_id=skill_id,
                 name=name,
                 steps=steps,
@@ -844,6 +950,13 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 post_verification=post_verification,
                 source=source
             )
+            if initial_confidence is not None:
+                ctx.storage.update_knowledge_state(
+                    game_id=target_game_id,
+                    item_type="skill",
+                    item_id=skill_id,
+                    new_status="candidate"
+                )
             res["success"] = True
             return res
         except Exception as e:
@@ -877,7 +990,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         Reports overall persistent memory statistics: state counts, transitions, action history, and learned skills.
         """
-        return ctx.skill_learner.get_learning_status(game_id=game_id)
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        return ctx.skill_learner.get_learning_status(game_id=target_game_id)
 
     # 20. delete_learned_memory
     @server.tool()
@@ -898,7 +1012,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 "message": f"Skill '{skill_id}' deleted." if deleted else f"Skill '{skill_id}' not found."
             }
         else:
-            return ctx.storage.delete_memory(game_id=game_id, scope=scope)
+            target_game_id = game_id or ctx.active_game_id
+            return ctx.storage.delete_memory(game_id=target_game_id, scope=scope)
 
     # 21. index_game_assets
     @server.tool()
@@ -911,6 +1026,247 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Read-only; never alters game files or memory.
         """
         return ctx.asset_indexer.index_game_directory(game_id=game_id, game_path=game_path)
+
+    # =========================================================================
+    # V2 Autonomous Exploration, Probing & Knowledge Lifecycle Tools (22-31)
+    # =========================================================================
+
+    # 22. discover_and_attach_game
+    @server.tool()
+    def discover_and_attach_game(
+        window_title: Optional[str] = None,
+        process_name: Optional[str] = None,
+        auto_detect_foreground: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Discovers and attaches to an active game window.
+        Initializes initially empty per-game knowledge if previously unseen.
+        """
+        return ctx.discover_and_attach(
+            window_title=window_title,
+            process_name=process_name,
+            auto_detect_foreground=auto_detect_foreground
+        )
+
+    # 23. explore_interactive_elements
+    @server.tool()
+    def explore_interactive_elements(
+        roi: Optional[List[float]] = None,
+        scan_mode: str = "all"
+    ) -> Dict[str, Any]:
+        """
+        Scans current game screen (or ROI) for candidate interactive UI affordances:
+        buttons, text anchors, tabs, and layout regions.
+        """
+        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
+        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        candidates = ctx.explorer.discover_interactive_elements(frame, roi=norm_roi, scan_mode=scan_mode)
+        return {
+            "count": len(candidates),
+            "candidates": [c.to_dict() for c in candidates],
+            "scan_mode": scan_mode
+        }
+
+    # 24. probe_action
+    @server.tool()
+    def probe_action(
+        action: str,
+        params: Optional[Dict[str, Any]] = None,
+        expected_roi: Optional[List[float]] = None,
+        dry_run: bool = False,
+        revert_on_fail: bool = False,
+        game_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a bounded Observe-Act-Verify probe step.
+        Dispatches action, measures visual/textual change, checks state transition,
+        and returns empirical verification evidence with optional automatic safe retreat.
+        """
+        norm_roi = NormalizedRect(expected_roi[0], expected_roi[1], expected_roi[2], expected_roi[3]) if expected_roi and len(expected_roi) == 4 else None
+        return ctx.explorer.probe_step(
+            action=action,
+            params=params,
+            expected_roi=norm_roi,
+            dry_run=dry_run,
+            revert_on_fail=revert_on_fail,
+            game_id=game_id or ctx.active_game_id
+        )
+
+    # 25. manage_knowledge_state
+    @server.tool()
+    def manage_knowledge_state(
+        item_type: str,
+        item_id: str,
+        status: str,
+        game_id: Optional[str] = None,
+        reason: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Updates knowledge lifecycle state (candidate, verified, suspect, rejected)
+        for a learned skill, transition, or selector.
+        """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        updated = ctx.storage.update_knowledge_state(
+            game_id=target_game_id,
+            item_type=item_type,
+            item_id=item_id,
+            new_status=status,
+            reason=reason
+        )
+        return {
+            "success": updated,
+            "game_id": target_game_id,
+            "item_type": item_type,
+            "item_id": item_id,
+            "status": status,
+            "reason": reason
+        }
+
+    # 26. create_knowledge_checkpoint
+    @server.tool()
+    def create_knowledge_checkpoint(
+        label: str,
+        game_id: Optional[str] = None,
+        description: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Creates an atomic point-in-time snapshot checkpoint of all learned knowledge for a game.
+        Protects against accidental memory corruption or false inferences during exploration.
+        """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        checkpoint_id = ctx.storage.create_checkpoint(game_id=target_game_id, label=label, description=description)
+        return {
+            "success": True,
+            "checkpoint_id": checkpoint_id,
+            "game_id": target_game_id,
+            "label": label
+        }
+
+    # 27. rollback_knowledge_checkpoint
+    @server.tool()
+    def rollback_knowledge_checkpoint(
+        checkpoint_id: int,
+        game_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Atomically restores game knowledge to a previously saved checkpoint.
+        """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        success = ctx.storage.rollback_checkpoint(game_id=target_game_id, checkpoint_id=checkpoint_id)
+        # Reload navigation graph if active
+        if success and target_game_id in ctx.navigation_graphs:
+            ctx.navigation_graphs[target_game_id] = NavigationGraph(game_id=target_game_id, storage=ctx.storage)
+        return {
+            "success": success,
+            "game_id": target_game_id,
+            "checkpoint_id": checkpoint_id,
+            "message": f"Rollback to checkpoint {checkpoint_id} {'succeeded' if success else 'failed'}."
+        }
+
+    # 28. list_knowledge_checkpoints
+    @server.tool()
+    def list_knowledge_checkpoints(
+        game_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Lists all saved knowledge checkpoints for a game.
+        """
+        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        checkpoints = ctx.storage.list_checkpoints(game_id=target_game_id)
+        return {
+            "game_id": target_game_id,
+            "count": len(checkpoints),
+            "checkpoints": checkpoints
+        }
+
+    # 29. query_cross_game_concepts
+    @server.tool()
+    def query_cross_game_concepts(
+        category: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Queries universal cross-game heuristics and concepts (e.g. pause_toggle, cancel_dialog, speed controls).
+        Provides initial exploration priors without hardcoded game logic.
+        """
+        concepts = ctx.storage.get_cross_game_concepts(category=category)
+        return {
+            "count": len(concepts),
+            "concepts": concepts
+        }
+
+    # 29b. register_cross_game_concept
+    @server.tool()
+    def register_cross_game_concept(
+        concept_id: str,
+        category: str,
+        name: str,
+        description: str,
+        default_action: str,
+        default_params: Dict[str, Any],
+        typical_effects: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Registers or updates a reusable cross-game concept heuristic in persistent memory.
+        """
+        success = ctx.storage.register_cross_game_concept(
+            concept_id=concept_id,
+            category=category,
+            name=name,
+            description=description,
+            default_action=default_action,
+            default_params=default_params,
+            typical_effects=typical_effects
+        )
+        return {
+            "success": success,
+            "concept_id": concept_id,
+            "message": f"Cross-game concept '{concept_id}' registered successfully."
+        }
+
+    # 30. optimize_skill
+    @server.tool()
+    def optimize_skill(
+        skill_id: str,
+        steps: List[Dict[str, Any]],
+        rationale: str = "",
+        game_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Optimizes a learned Game Skill by refining its step sequence, logging rationale,
+        and bumping its version number while preserving execution track records.
+        """
+        try:
+            success = ctx.skill_learner.optimize_skill(skill_id=skill_id, new_steps=steps, rationale=rationale)
+            return {
+                "success": success,
+                "skill_id": skill_id,
+                "message": f"Skill '{skill_id}' {'optimized successfully' if success else 'not found'}."
+            }
+        except (SafetyViolationError, ValueError) as e:
+            return {
+                "success": False,
+                "skill_id": skill_id,
+                "message": f"Optimization rejected: {e}"
+            }
+
+    # 31. prune_temporary_data
+    @server.tool()
+    def prune_temporary_data(
+        game_id: Optional[str] = None,
+        max_age_seconds: int = 3600,
+        max_history_records: int = 1000,
+        screenshot_dir: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Cleans up temporary screenshot files and prunes redundant action history entries.
+        """
+        pruned_screenshots = ctx.storage.prune_temporary_screenshots(directory=screenshot_dir, max_age_seconds=max_age_seconds)
+        pruned_history = ctx.storage.prune_history(game_id=game_id, max_records=max_history_records)
+        return {
+            "pruned_screenshots": pruned_screenshots,
+            "pruned_history_records": pruned_history,
+            "game_id": game_id or "all_games"
+        }
 
     return server
 

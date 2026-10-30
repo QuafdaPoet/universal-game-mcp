@@ -73,7 +73,7 @@ class UIStateRecognizer:
         phash = compute_dhash(frame)
         signals: Dict[str, Any] = {}
         candidate_scores: Dict[str, float] = {}
-        evidence: Dict[str, Any] = {"phash": phash}
+        evidence: Dict[str, Any] = {"phash": phash, "game_id": game_id}
 
         h, w = frame.shape[:2]
 
@@ -244,9 +244,28 @@ class UIStateRecognizer:
         signals: Dict[str, Any],
         evidence: Dict[str, Any]
     ) -> None:
-        """Evaluates generic signals for unsupported / unknown games."""
-        full_ocr = self.ocr_engine.read_text(frame, event_tag="generic_state_scan")
-        signals["text_item_count"] = len(full_ocr.items)
-        if full_ocr.items:
-            # Pick prominent words as potential state cues
-            signals["prominent_text"] = [i.text for i in full_ocr.items[:5] if len(i.text) > 3]
+        """Evaluates generic signals for unsupported / unknown games using adaptive layout analysis."""
+        try:
+            full_ocr = self.ocr_engine.read_text(frame, event_tag="generic_state_scan")
+            signals["text_item_count"] = len(full_ocr.items)
+            prominent = [i.text.strip() for i in full_ocr.items[:8] if len(i.text.strip()) > 2]
+            signals["prominent_text"] = prominent
+            evidence["prominent_text"] = prominent
+
+            # Match against registered states in persistent storage
+            if self.storage and prominent:
+                game_id = evidence.get("game_id", "generic")
+                known_states = self.storage.get_states(game_id)
+                for ks in known_states:
+                    k_ev = ks.evidence or {}
+                    k_prom = k_ev.get("prominent_text", [])
+                    if k_prom:
+                        # Overlap ratio: count how many anchor keywords from known state (k_prom) are found in observed text
+                        matches = sum(1 for kp in k_prom if any(kp.lower() in p.lower() or p.lower() in kp.lower() for p in prominent))
+                        overlap_ratio = matches / max(1, len(k_prom))
+                        if overlap_ratio >= 0.5:
+                            score = round(0.5 + (overlap_ratio * 0.4), 3)
+                            candidate_scores[ks.state_name] = max(candidate_scores.get(ks.state_name, 0.0), score)
+                            signals["anchor_match"] = {"state": ks.state_name, "score": score, "matches": matches}
+        except Exception as e:
+            logger.debug("Generic state scan notice: %s", e)

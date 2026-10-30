@@ -54,6 +54,8 @@ class NavigationGraph(MenuNavigationGraphContract):
         try:
             records = self.storage.get_transitions(self.game_id)
             for r in records:
+                if getattr(r, "status", None) == "rejected":
+                    continue
                 edge = NavigationEdge(
                     source_node_id=r.from_state,
                     target_node_id=r.to_state,
@@ -178,7 +180,8 @@ class NavigationGraph(MenuNavigationGraphContract):
         success: bool,
         cost: float = 1.0,
         evidence: Optional[Dict[str, Any]] = None,
-        source: str = "live"
+        source: str = "live",
+        is_execution_error: bool = False
     ) -> None:
         """Updates edge weights and records outcome in persistent storage."""
         if self.storage:
@@ -191,14 +194,16 @@ class NavigationGraph(MenuNavigationGraphContract):
                 success=success,
                 cost=cost,
                 evidence=evidence,
-                source=source
+                source=source,
+                is_execution_error=is_execution_error
             )
 
-        # Adjust in-memory edge cost dynamically based on outcome
-        for edge in self.adj_list.get(from_state, []):
-            if edge.target_node_id == to_state and edge.trigger_action == action_type and edge.parameters == params:
-                if success:
-                    edge.cost = max(0.5, edge.cost * 0.95)
-                else:
-                    edge.cost = edge.cost + 2.0  # Penalize failing edges
-                break
+        # Adjust in-memory edge cost dynamically based on outcome (do not penalize execution errors)
+        if not is_execution_error:
+            for edge in self.adj_list.get(from_state, []):
+                if edge.target_node_id == to_state and edge.trigger_action == action_type and edge.parameters == params:
+                    if success:
+                        edge.cost = max(0.5, edge.cost * 0.95)
+                    else:
+                        edge.cost = edge.cost + 2.0  # Penalize failing edges
+                    break

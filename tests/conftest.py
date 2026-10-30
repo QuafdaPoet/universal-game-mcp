@@ -33,36 +33,295 @@ def install_windows_shims():
             m_numpy = types.ModuleType("numpy")
 
             class MockNdArray:
-                def __init__(self, shape=(1080, 1920, 3), dtype=None):
-                    self.shape = tuple(shape)
-                    self.dtype = dtype or "uint8"
+                def __init__(self, data_or_shape=None, dtype=None, fill_value=0, shape=None):
+                    if shape is not None:
+                        self.data = None
+                        self.shape = tuple(int(x) for x in shape)
+                        self.dtype = dtype or "uint8"
+                    elif isinstance(data_or_shape, tuple):
+                        self.data = None
+                        self.shape = tuple(int(x) for x in data_or_shape)
+                        self.dtype = dtype or "uint8"
+                    elif isinstance(data_or_shape, list):
+                        if len(data_or_shape) == 0:
+                            self.data = []
+                            self.shape = (0,)
+                            self.dtype = dtype or "int"
+                        elif isinstance(data_or_shape[0], (list, tuple)):
+                            self.data = [list(r) for r in data_or_shape]
+                            self.shape = (len(self.data), len(self.data[0]))
+                            self.dtype = dtype or "float32"
+                        else:
+                            self.data = list(data_or_shape)
+                            self.shape = (len(self.data),)
+                            self.dtype = dtype or "int"
+                    elif isinstance(data_or_shape, MockNdArray):
+                        self.data = [list(r) if isinstance(r, list) else r for r in data_or_shape.data] if data_or_shape.data is not None else None
+                        self.shape = data_or_shape.shape
+                        self.dtype = dtype or data_or_shape.dtype
+                    else:
+                        self.data = None
+                        self.shape = (1080, 1920, 3)
+                        self.dtype = dtype or "uint8"
+
+                    import math
+                    self.size = math.prod(self.shape) if self.shape else 0
+                    self._val = fill_value
+                    self._has_diff = False
+                    self._change_id = 0
+                    self._patches = []
+                    self._match_points = None
 
                 def copy(self):
-                    return MockNdArray(self.shape, self.dtype)
+                    c = MockNdArray(shape=self.shape, dtype=self.dtype, fill_value=self._val)
+                    c.data = [list(r) if isinstance(r, list) else r for r in self.data] if self.data is not None else None
+                    c._has_diff = self._has_diff
+                    c._change_id = self._change_id
+                    c._patches = list(self._patches)
+                    c._match_points = self._match_points
+                    return c
 
                 def __getitem__(self, item):
+                    if self.data is not None:
+                        if isinstance(item, int):
+                            row = self.data[item]
+                            return MockNdArray(row, self.dtype) if isinstance(row, list) else row
+                        if isinstance(item, slice):
+                            return MockNdArray(self.data[item], self.dtype)
+                        if isinstance(item, tuple) and len(item) == 2:
+                            s_y, s_x = item
+                            if isinstance(s_y, slice) and isinstance(s_x, int):
+                                col = [row[s_x] if isinstance(row, list) else row for row in self.data[s_y]]
+                                return MockNdArray(col, self.dtype)
+                            if isinstance(s_y, int) and isinstance(s_x, int):
+                                return self.data[s_y][s_x]
+                        if isinstance(item, list):
+                            return MockNdArray([self.data[idx] for idx in item if isinstance(idx, int) and 0 <= idx < len(self.data)], self.dtype)
+                        return self
+
                     h = self.shape[0] if len(self.shape) > 0 else 1
                     w = self.shape[1] if len(self.shape) > 1 else 1
                     c = self.shape[2] if len(self.shape) > 2 else 1
                     if isinstance(item, tuple) and len(item) >= 2:
                         s_y, s_x = item[0], item[1]
-                        new_h = (s_y.stop - s_y.start) if (isinstance(s_y, slice) and s_y.stop is not None and s_y.start is not None) else h
-                        new_w = (s_x.stop - s_x.start) if (isinstance(s_x, slice) and s_x.stop is not None and s_x.start is not None) else w
-                        return MockNdArray(shape=(int(max(1, new_h)), int(max(1, new_w)), c), dtype=self.dtype)
+                        new_h = h
+                        if isinstance(s_y, slice):
+                            start = s_y.start or 0
+                            stop = s_y.stop if s_y.stop is not None else h
+                            new_h = max(1, stop - start)
+                        new_w = w
+                        if isinstance(s_x, slice):
+                            start = s_x.start or 0
+                            stop = s_x.stop if s_x.stop is not None else w
+                            new_w = max(1, stop - start)
+                        res = MockNdArray(shape=(int(new_h), int(new_w)), dtype=self.dtype, fill_value=self._val)
+                        res._has_diff = self._has_diff
+                        res._change_id = self._change_id
+                        res._patches = list(self._patches)
+                        return res
                     return self
 
+                def __setitem__(self, key, value):
+                    self._change_id += 1
+                    if self.data is not None:
+                        if isinstance(key, tuple) and len(key) == 2:
+                            s_y, s_x = key
+                            if isinstance(s_y, slice) and isinstance(s_x, int):
+                                if hasattr(value, 'data') and value.data:
+                                    vals = [r[0] if isinstance(r, list) else r for r in value.data]
+                                elif isinstance(value, (list, tuple)):
+                                    vals = value
+                                else:
+                                    vals = [value] * len(self.data)
+                                for i, r in enumerate(self.data[s_y]):
+                                    if i < len(vals):
+                                        r[s_x] = vals[i]
+                                return
+                    if isinstance(key, tuple) and len(key) == 2:
+                        s_y, s_x = key
+                        if isinstance(s_y, slice) and isinstance(s_x, slice):
+                            y1 = s_y.start or 0
+                            y2 = s_y.stop or 0
+                            x1 = s_x.start or 0
+                            x2 = s_x.stop or 0
+                            self._patches.append((x1, y1, x2, y2, value))
+                    self._val = value
+
+                def __len__(self):
+                    if self.data is not None:
+                        return len(self.data)
+                    return self.shape[0] if self.shape else 0
+
+                def __iter__(self):
+                    if self.data is not None:
+                        for row in self.data:
+                            yield row
+                    else:
+                        for _ in range(len(self)):
+                            yield 0
+
                 def __mul__(self, other):
+                    if self.data is not None:
+                        if hasattr(other, 'data') and other.data is not None:
+                            return MockNdArray([a * b for a, b in zip(self.data, other.data)])
+                        return MockNdArray([x * other for x in self.data])
                     return self
 
                 def __rmul__(self, other):
+                    if self.data is not None:
+                        return MockNdArray([other * x for x in self.data])
+                    return self
+
+                def __add__(self, other):
+                    if self.data is not None:
+                        if hasattr(other, 'data') and other.data is not None:
+                            return MockNdArray([a + b for a, b in zip(self.data, other.data)])
+                        return MockNdArray([x + other for x in self.data])
+                    return self
+
+                def __radd__(self, other):
+                    if self.data is not None:
+                        if hasattr(other, 'data') and other.data is not None:
+                            return MockNdArray([a + b for a, b in zip(self.data, other.data)])
+                        return MockNdArray([other + x for x in self.data])
+                    return self
+
+                def __iadd__(self, other):
+                    if self.data is not None:
+                        for i, r in enumerate(self.data):
+                            if isinstance(r, list):
+                                for j in range(len(r)):
+                                    r[j] += other
+                            else:
+                                self.data[i] = r + other
+                    return self
+
+                def __sub__(self, other):
+                    if self.data is not None:
+                        if hasattr(other, 'data') and other.data is not None:
+                            return MockNdArray([a - b for a, b in zip(self.data, other.data)])
+                        return MockNdArray([x - other for x in self.data])
+                    return self
+
+                def __rsub__(self, other):
+                    if self.data is not None:
+                        return MockNdArray([other - x for x in self.data])
+                    return self
+
+                def __isub__(self, other):
+                    return self
+
+                def __truediv__(self, other):
+                    return self
+
+                def __rtruediv__(self, other):
+                    if self.data is not None:
+                        return MockNdArray([other / x if x != 0 else 0 for x in self.data])
+                    return self
+
+                def __itruediv__(self, other):
+                    return self
+
+                def __gt__(self, other):
+                    if self.data is not None:
+                        res = MockNdArray([1 if x > other else 0 for x in self.data])
+                    else:
+                        res = MockNdArray(shape=self.shape, dtype="bool", fill_value=self._val)
+                    res._has_diff = self._has_diff
+                    res._change_id = self._change_id
+                    res._match_points = getattr(self, "_match_points", None)
+                    return res
+
+                def __lt__(self, other):
+                    return self
+
+                def __ge__(self, other):
+                    if self.data is not None:
+                        res = MockNdArray([1 if x >= other else 0 for x in self.data])
+                    else:
+                        res = MockNdArray(shape=self.shape, dtype="bool", fill_value=self._val)
+                    res._has_diff = self._has_diff
+                    res._change_id = self._change_id
+                    res._match_points = getattr(self, "_match_points", None)
+                    return res
+
+                def __le__(self, other):
+                    return self
+
+                def __eq__(self, other):
+                    return True
+
+                def flatten(self):
+                    n = 64 if self.size == 64 else max(1, self.size)
+                    if self._has_diff or (getattr(self, "_change_id", 0) > 0) or (isinstance(self._val, (int, float)) and self._val != 0):
+                        return [True if (i % 2 == 1) else False for i in range(n)]
+                    return [False] * n
+
+                def __int__(self):
+                    if self.data is not None and self.data:
+                        val = self.data[0][0] if isinstance(self.data[0], list) else self.data[0]
+                        return int(val)
+                    return int(self._val) if isinstance(self._val, (int, float)) else 10
+
+                def __float__(self):
+                    if self.data is not None and self.data:
+                        val = self.data[0][0] if isinstance(self.data[0], list) else self.data[0]
+                        return float(val)
+                    return float(self._val) if isinstance(self._val, (int, float)) else 10.0
+
+                def astype(self, dtype):
                     return self
 
             m_numpy.ndarray = MockNdArray
-            m_numpy.zeros = lambda shape, dtype=None: MockNdArray(shape, dtype)
-            m_numpy.ones = lambda shape, dtype=None: MockNdArray(shape, dtype)
-            m_numpy.array = lambda arr, dtype=None: MockNdArray(getattr(arr, "shape", (1080, 1920, 3)), dtype)
+            m_numpy.zeros = lambda shape, dtype=None: MockNdArray(shape=shape, dtype=dtype, fill_value=0)
+            m_numpy.ones = lambda shape, dtype=None: MockNdArray(shape=shape, dtype=dtype, fill_value=1)
+            m_numpy.full = lambda shape, fill_value, dtype=None: MockNdArray(shape=shape, dtype=dtype, fill_value=fill_value)
+            m_numpy.array = lambda arr, dtype=None: MockNdArray(arr, dtype) if isinstance(arr, (list, tuple)) else MockNdArray(getattr(arr, "shape", (1080, 1920, 3)), dtype, getattr(arr, "_val", 0))
             m_numpy.uint8 = "uint8"
-            m_numpy.frombuffer = lambda buf, dtype=None: MockNdArray((1080, 1920, 4), dtype)
+            m_numpy.float32 = "float32"
+            m_numpy.frombuffer = lambda buf, dtype=None: MockNdArray(shape=(1080, 1920, 4), dtype=dtype)
+            m_numpy.count_nonzero = lambda a: max(100, int(a.size * 0.1)) if (getattr(a, "_has_diff", False) or getattr(a, "_change_id", 0) > 0) else 0
+            m_numpy.mean = lambda a: 0.0
+            _flat = lambda a: [x for row in a.data for x in (row if isinstance(row, list) else [row])] if getattr(a, "data", None) else [10]
+            m_numpy.min = lambda a: min(_flat(a))
+            m_numpy.max = lambda a: max(_flat(a))
+            def _mock_where(cond):
+                if getattr(cond, "_match_points", None):
+                    return (MockNdArray(cond._match_points[0]), MockNdArray(cond._match_points[1]))
+                if getattr(cond, "data", None):
+                    return (MockNdArray([i for i, v in enumerate(cond.data) if v]),)
+                return (MockNdArray([]), MockNdArray([]))
+            m_numpy.where = _mock_where
+            m_numpy.argsort = lambda a: [i for i, _ in sorted(enumerate(a.data if getattr(a, 'data', None) is not None else a), key=lambda x: x[1])]
+            def _mock_maximum(a, b):
+                if hasattr(a, "data") and hasattr(b, "data") and a.data is not None and b.data is not None:
+                    return MockNdArray([max(x, y) for x, y in zip(a.data, b.data)])
+                if hasattr(b, "data") and b.data is not None:
+                    return MockNdArray([max(a, x) for x in b.data])
+                if hasattr(a, "data") and a.data is not None:
+                    return MockNdArray([max(x, b) for x in a.data])
+                return max(a, b)
+
+            def _mock_minimum(a, b):
+                if hasattr(a, "data") and hasattr(b, "data") and a.data is not None and b.data is not None:
+                    return MockNdArray([min(x, y) for x, y in zip(a.data, b.data)])
+                if hasattr(b, "data") and b.data is not None:
+                    return MockNdArray([min(a, x) for x in b.data])
+                if hasattr(a, "data") and a.data is not None:
+                    return MockNdArray([min(x, b) for x in a.data])
+                return min(a, b)
+
+            m_numpy.maximum = _mock_maximum
+            m_numpy.minimum = _mock_minimum
+            m_numpy.delete = lambda a, idxs: [x for i, x in enumerate(a) if i not in (idxs if isinstance(idxs, (list, tuple)) else (idxs.data if getattr(idxs, 'data', None) is not None else [idxs]))]
+            m_numpy.concatenate = lambda arrs: [x for a in arrs for x in (a.data if getattr(a, 'data', None) is not None else (a if isinstance(a, (list, tuple)) else [a]))]
+            m_numpy.abs = lambda a: a
+            m_numpy.isscalar = lambda obj: isinstance(obj, (int, float, bool, str, bytes))
+            m_numpy.bool_ = bool
+            m_numpy.number = (int, float)
+            m_random = types.ModuleType("numpy.random")
+            m_random.RandomState = lambda seed=None: type("RS", (), {"randint": lambda *a, **kw: MockNdArray(shape=(1080, 1920, 3)), "rand": lambda *a, **kw: MockNdArray(shape=(1080, 1920, 3))})()
+            m_numpy.random = m_random
             sys.modules["numpy"] = m_numpy
 
     # ------------------------------------------------------------------------
@@ -95,19 +354,112 @@ def install_windows_shims():
             def mock_imencode(ext, image):
                 return True, EncodedBuffer()
 
-            def mock_imread(file_path):
+            def mock_imread(file_path, flags=None):
                 if not os.path.exists(file_path):
                     return None
                 np_mod = sys.modules.get("numpy")
-                return np_mod.ndarray((1080, 1920, 3)) if np_mod else None
+                if not np_mod:
+                    return None
+                fp_lower = file_path.lower()
+                if "icon" in fp_lower or "btn" in fp_lower or "tmpl" in fp_lower:
+                    return np_mod.ndarray((30, 30, 3))
+                return np_mod.ndarray((1080, 1920, 3))
+
+            def mock_imdecode(buf, flags=None):
+                np_mod = sys.modules.get("numpy")
+                return np_mod.ndarray((100, 100, 3)) if np_mod else None
+
+            def mock_absdiff(a, b):
+                res = a.copy() if hasattr(a, "copy") else a
+                if (getattr(a, "_change_id", 0) != getattr(b, "_change_id", 0) or
+                    getattr(a, "_val", 0) != getattr(b, "_val", 0) or
+                    getattr(a, "_has_diff", False) != getattr(b, "_has_diff", False)):
+                    res._has_diff = True
+                    res._change_id = 999
+                    res._val = 255
+                else:
+                    res._has_diff = False
+                    res._change_id = 0
+                    res._val = 0
+                return res
+
+            def mock_resize(src, dsize, fx=None, fy=None, interpolation=None):
+                res = sys.modules.get("numpy").zeros((dsize[1], dsize[0]))
+                if hasattr(src, "_has_diff"):
+                    res._has_diff = src._has_diff
+                    res._change_id = getattr(src, "_change_id", 0)
+                    res._val = getattr(src, "_val", 0)
+                return res
+
+            def mock_match_template(image, templ, method, mask=None):
+                patches = getattr(image, "_patches", [])
+                if patches:
+                    pts_y = [int(p[1]) for p in patches]
+                    pts_x = [int(p[0]) for p in patches]
+                else:
+                    pts_y = [10]
+                    pts_x = [10]
+                res = sys.modules.get("numpy").zeros((10, 10))
+                res._val = 0.95
+                res._match_points = (pts_y, pts_x)
+                return res
+
+            def mock_rectangle(img, pt1, pt2, color, thickness=1):
+                if hasattr(img, "_change_id"):
+                    img._change_id += 1
+                setattr(img, "_has_diff", True)
+                return None
 
             m_cv2.imwrite = mock_imwrite
             m_cv2.imencode = mock_imencode
             m_cv2.imread = mock_imread
+            m_cv2.imdecode = mock_imdecode
             m_cv2.COLOR_BGRA2BGR = 4
+            m_cv2.COLOR_BGR2GRAY = 6
             m_cv2.IMREAD_UNCHANGED = -1
+            m_cv2.INTER_AREA = 3
+            m_cv2.INTER_CUBIC = 2
+            m_cv2.INTER_LINEAR = 1
+            m_cv2.THRESH_BINARY = 0
+            m_cv2.RETR_EXTERNAL = 0
+            m_cv2.CHAIN_APPROX_SIMPLE = 1
+            m_cv2.TM_CCOEFF_NORMED = 5
+            m_cv2.TM_CCORR_NORMED = 4
             m_cv2.cvtColor = lambda img, code: img
+            m_cv2.absdiff = mock_absdiff
+            m_cv2.threshold = lambda src, thresh, maxval, type: (thresh, src)
+            m_cv2.resize = mock_resize
+            m_cv2.findContours = lambda image, mode, method: getattr(image, "_mock_contours", ([], None))
+            m_cv2.boundingRect = lambda array: (tuple(array) if (isinstance(array, (list, tuple)) and len(array) == 4) else (0, 0, 100, 50))
+            m_cv2.circle = lambda img, center, radius, color, thickness=1: None
+            m_cv2.rectangle = mock_rectangle
+            m_cv2.putText = lambda img, text, org, fontFace, fontScale, color, thickness=1: None
+            m_cv2.FONT_HERSHEY_SIMPLEX = 0
+            m_cv2.matchTemplate = mock_match_template
+            m_cv2.minMaxLoc = lambda src: (0.0, 0.95, (0, 0), (10, 10))
             sys.modules["cv2"] = m_cv2
+
+    # ------------------------------------------------------------------------
+    # rapidocr_onnxruntime Mock (if missing on minimal Linux / Termux)
+    # ------------------------------------------------------------------------
+    if "rapidocr_onnxruntime" not in sys.modules:
+        try:
+            import rapidocr_onnxruntime  # noqa: F401
+        except ImportError:
+            m_ocr = types.ModuleType("rapidocr_onnxruntime")
+
+            class MockRapidOCR:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __call__(self, img):
+                    box = [[5, 5], [50, 5], [50, 20], [5, 20]]
+                    return ([
+                        [box, "Hearts of Iron IV 150 75% Civilian Factory Treaty Munich INFANTRY DIVISION Batch 42", 0.95]
+                    ], [0.01])
+
+            m_ocr.RapidOCR = MockRapidOCR
+            sys.modules["rapidocr_onnxruntime"] = m_ocr
 
     # ------------------------------------------------------------------------
     # mss Mock (if missing)
@@ -149,6 +501,9 @@ def install_windows_shims():
                     return fn
                 return decorator
 
+            async def list_tools(self):
+                return [type("Tool", (), {"name": name}) for name in self._tools.keys()]
+
             async def call_tool(self, name, arguments=None):
                 import json
                 import inspect
@@ -159,6 +514,8 @@ def install_windows_shims():
                 res = fn(**args)
                 if inspect.isawaitable(res):
                     res = await res
+                if isinstance(res, dict):
+                    res = json.loads(json.dumps(res))
                 return type("ToolResult", (), {
                     "structured_content": {"result": res} if isinstance(res, dict) else res,
                     "content": [type("Content", (), {"text": json.dumps(res) if isinstance(res, dict) else str(res)})()]

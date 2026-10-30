@@ -17,7 +17,7 @@ import cv2
 
 logger = logging.getLogger("ugm.memory.database")
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def compute_dhash(image: np.ndarray, hash_size: int = 8) -> str:
@@ -225,6 +225,64 @@ class DatabaseManager:
                 ON learned_skills (game_id, status);
 
                 INSERT INTO schema_version (version, applied_at) VALUES (1, unixepoch('subsec'));
+            """)
+
+        if from_ver < 2:
+            # Migration v2: Checkpoints, cross-game concepts, and 4-state knowledge lifecycle
+            def _add_column_if_missing(table: str, col_name: str, col_type: str):
+                cur = conn.execute(f"PRAGMA table_info({table});")
+                cols = [r[1] for r in cur.fetchall()]
+                if col_name not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type};")
+
+            _add_column_if_missing("navigation_transitions", "status", "TEXT NOT NULL DEFAULT 'candidate'")
+            _add_column_if_missing("navigation_transitions", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing("selectors_memory", "status", "TEXT NOT NULL DEFAULT 'candidate'")
+            _add_column_if_missing("selectors_memory", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing("learned_skills", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing("learned_skills", "optimization_notes", "TEXT")
+
+            conn.executescript("""
+                -- Knowledge point-in-time checkpoints for rollback
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    description TEXT,
+                    snapshot_data TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_checkpoints_game
+                ON checkpoints (game_id, created_at);
+
+                -- Universal cross-game concepts & heuristics library
+                CREATE TABLE IF NOT EXISTS cross_game_concepts (
+                    concept_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    default_action TEXT NOT NULL,
+                    default_params TEXT NOT NULL,
+                    typical_effects TEXT,
+                    created_at REAL NOT NULL
+                );
+
+                -- Insert standard universal concept heuristics
+                INSERT OR IGNORE INTO cross_game_concepts (concept_id, category, name, description, default_action, default_params, typical_effects, created_at)
+                VALUES 
+                    ('pause_toggle', 'controls', 'Toggle Pause/Unpause', 'Standard hotkey or button to pause/unpause simulation', 'press_keys', '{"keys": ["space"]}', '{"time_flow": "toggle"}', unixepoch('subsec')),
+                    ('cancel_or_back', 'navigation', 'Cancel or Close Menu', 'Dismiss current dialog, drawer, or modal and return to viewport', 'press_keys', '{"keys": ["escape"]}', '{"modal": "closed"}', unixepoch('subsec')),
+                    ('cancel_dialog', 'dialogs', 'Cancel / Dismiss Dialog', 'Dismiss active dialog or return', 'press_keys', '{"keys": ["escape"]}', '{"dialog": "dismissed"}', unixepoch('subsec')),
+                    ('confirm_dialog', 'dialogs', 'Confirm Selection / Submit', 'Confirm current modal selection or accept prompt', 'press_keys', '{"keys": ["enter"]}', '{"dialog": "submitted"}', unixepoch('subsec')),
+                    ('game_speed', 'controls', 'Adjust Game Speed', 'Keys to control simulation speed', 'press_keys', '{"keys": ["1", "2", "3", "4", "5"]}', '{"speed": "changed"}', unixepoch('subsec')),
+                    ('speed_increase', 'controls', 'Increase Game Speed', 'Numpad plus or number key to accelerate game tick', 'press_keys', '{"keys": ["num+"]}', '{"speed": "faster"}', unixepoch('subsec')),
+                    ('speed_decrease', 'controls', 'Decrease Game Speed', 'Numpad minus or number key to decelerate game tick', 'press_keys', '{"keys": ["num-"]}', '{"speed": "slower"}', unixepoch('subsec')),
+                    ('pan_map_up', 'navigation', 'Pan Map North', 'Pan camera or viewport up', 'press_keys', '{"keys": ["w"]}', '{"camera": "north"}', unixepoch('subsec')),
+                    ('pan_map_down', 'navigation', 'Pan Map South', 'Pan camera or viewport down', 'press_keys', '{"keys": ["s"]}', '{"camera": "south"}', unixepoch('subsec')),
+                    ('pan_map_left', 'navigation', 'Pan Map West', 'Pan camera or viewport left', 'press_keys', '{"keys": ["a"]}', '{"camera": "west"}', unixepoch('subsec')),
+                    ('pan_map_right', 'navigation', 'Pan Map East', 'Pan camera or viewport right', 'press_keys', '{"keys": ["d"]}', '{"camera": "east"}', unixepoch('subsec'));
+
+                INSERT INTO schema_version (version, applied_at) VALUES (2, unixepoch('subsec'));
             """)
 
         logger.info("Database schema migration to v%d complete.", to_ver)
