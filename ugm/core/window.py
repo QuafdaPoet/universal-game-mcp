@@ -40,6 +40,12 @@ class WindowManager:
         self._mock_window = mock
         self._current_window = mock
 
+    def attach_window(self, win: Optional[WindowInfo]) -> None:
+        """Sets the active window and updates mock reference if in mock/headless mode."""
+        self._current_window = win
+        if self._mock_window is not None or sys.platform != "win32":
+            self._mock_window = win
+
     @property
     def current_window(self) -> Optional[WindowInfo]:
         if self._mock_window is not None:

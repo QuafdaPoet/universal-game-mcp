@@ -9,12 +9,14 @@ from __future__ import annotations
 import os
 import json
 import time
+import tempfile
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 
 from .database import DatabaseManager, compute_dhash, hamming_distance
 from ..skills.contracts import PersistentKnowledgeStorageContract
+from ..core.safety import SafetyViolationError
 
 logger = logging.getLogger("ugm.memory.storage")
 
@@ -165,6 +167,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         self._prune_states_if_needed(game_id, max_states=1000)
         return state_id
 
+    record_state = record_ui_state
+
     def get_states(self, game_id: str, source: Optional[str] = None) -> List[UIStateRecord]:
         conn = self.db.get_connection()
         query = "SELECT * FROM ui_states WHERE game_id = ?"
@@ -228,44 +232,98 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         to_state: str,
         action_type: str,
         params: Dict[str, Any],
-        success: bool,
         cost: float = 1.0,
+        success: bool = True,
         evidence: Optional[Dict[str, Any]] = None,
-        source: str = "live"
+        source: str = "live",
+        is_execution_error: bool = False,
+        status: Optional[str] = None
     ) -> None:
-        """Records a verified or failed navigation transition between states."""
+        """Records a verified or failed navigation transition between states with 4-state lifecycle."""
         conn = self.db.get_connection()
         now = time.time()
         param_str = json.dumps(params, sort_keys=True)
         ev_str = json.dumps(evidence or {})
 
-        succ_inc = 1 if success else 0
-        fail_inc = 0 if success else 1
+        if is_execution_error:
+            # Execution error (transient OS / window glitch) does NOT penalize transition knowledge
+            logger.info("Transition execution error recorded without penalizing knowledge state.")
+            return
 
         with conn:
-            conn.execute("""
-                INSERT INTO navigation_transitions (
-                    game_id, from_state, to_state, action_type, params, cost, success_count, fail_count,
-                    confidence, evidence, source, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(game_id, from_state, to_state, action_type, params) DO UPDATE SET
-                    success_count = success_count + excluded.success_count,
-                    fail_count = fail_count + excluded.fail_count,
-                    confidence = CAST(success_count + excluded.success_count AS REAL) / 
-                                 CAST(success_count + excluded.success_count + fail_count + excluded.fail_count AS REAL),
-                    cost = excluded.cost,
-                    evidence = excluded.evidence,
-                    updated_at = excluded.updated_at
-            """, (
-                game_id, from_state, to_state, action_type, param_str, cost,
-                succ_inc, fail_inc, 1.0 if success else 0.0, ev_str, source, now, now
-            ))
+            cur = conn.execute("""
+                SELECT id, success_count, fail_count, confidence, status, consecutive_failures
+                FROM navigation_transitions
+                WHERE game_id = ? AND from_state = ? AND to_state = ? AND action_type = ? AND params = ?
+            """, (game_id, from_state, to_state, action_type, param_str))
+            row = cur.fetchone()
+
+            if not row:
+                init_status = status or ("verified" if success else "candidate")
+                succ_cnt = 1 if success else 0
+                fail_cnt = 0 if success else 1
+                conf = 1.0 if success else 0.0
+                c_fail = 0 if success else 1
+                conn.execute("""
+                    INSERT INTO navigation_transitions (
+                        game_id, from_state, to_state, action_type, params, cost, success_count, fail_count,
+                        confidence, evidence, source, created_at, updated_at, status, consecutive_failures
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    game_id, from_state, to_state, action_type, param_str, cost,
+                    succ_cnt, fail_cnt, conf, ev_str, source, now, now, init_status, c_fail
+                ))
+            else:
+                succ_cnt = row["success_count"] + (1 if success else 0)
+                fail_cnt = row["fail_count"] + (0 if success else 1)
+                conf = round(succ_cnt / max(1, succ_cnt + fail_cnt), 3)
+                curr_status = row["status"] or "candidate"
+                c_fail = row["consecutive_failures"] or 0
+
+                if success:
+                    c_fail = 0
+                    if curr_status == "candidate" and succ_cnt >= 2 and conf >= 0.8:
+                        new_status = "verified"
+                    elif curr_status == "suspect":
+                        new_status = "verified"
+                    else:
+                        new_status = curr_status
+                else:
+                    c_fail += 1
+                    if curr_status == "verified" and c_fail >= 2:
+                        new_status = "suspect"
+                    elif curr_status == "candidate" and c_fail >= 3:
+                        new_status = "rejected"
+                    elif curr_status == "suspect" and c_fail >= 4:
+                        new_status = "rejected"
+                    else:
+                        new_status = curr_status
+
+                if status is not None:
+                    new_status = status
+
+                conn.execute("""
+                    UPDATE navigation_transitions SET
+                        success_count = ?,
+                        fail_count = ?,
+                        confidence = ?,
+                        cost = ?,
+                        evidence = ?,
+                        updated_at = ?,
+                        status = ?,
+                        consecutive_failures = ?
+                    WHERE id = ?
+                """, (succ_cnt, fail_cnt, conf, cost, ev_str, now, new_status, c_fail, row["id"]))
+
+    save_transition = record_transition
 
     def get_transitions(
         self,
         game_id: str,
         from_state: Optional[str] = None,
-        min_confidence: float = 0.0
+        min_confidence: float = 0.0,
+        status: Optional[str] = None,
+        exclude_rejected: bool = True
     ) -> List[TransitionRecord]:
         """Retrieves verified navigation edges for pathfinding."""
         conn = self.db.get_connection()
@@ -274,6 +332,11 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         if from_state:
             query += " AND from_state = ?"
             params.append(from_state)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        elif exclude_rejected:
+            query += " AND (status IS NULL OR status != 'rejected')"
         query += " ORDER BY cost ASC"
 
         cur = conn.execute(query, tuple(params))
@@ -396,8 +459,16 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     preconditions = excluded.preconditions,
                     steps = excluded.steps,
                     post_verification = excluded.post_verification,
-                    status = excluded.status,
-                    confidence = excluded.confidence,
+                    status = CASE 
+                        WHEN learned_skills.status = 'verified' AND excluded.status = 'candidate' 
+                        THEN 'verified' 
+                        ELSE excluded.status 
+                    END,
+                    confidence = CASE 
+                        WHEN learned_skills.status = 'verified' AND excluded.status = 'candidate' 
+                        THEN learned_skills.confidence 
+                        ELSE excluded.confidence 
+                    END,
                     source = excluded.source,
                     updated_at = excluded.updated_at
             """, (
@@ -453,22 +524,34 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             v_count += 1
             if success:
                 s_count += 1
-                consec_fail = 0
             else:
                 f_count += 1
-                consec_fail += 1
 
             confidence = round(s_count / max(1, s_count + f_count), 3)
             new_status = curr_status
 
             if success:
+                if curr_status == "suspect":
+                    # Require 2 consecutive recovery successes to restore to verified
+                    if consec_fail > 0:
+                        consec_fail = -1
+                    else:
+                        consec_fail -= 1
+                    if abs(consec_fail) >= 2:
+                        new_status = "verified"
+                        consec_fail = 0
+                        logger.info("Skill '%s' restored to VERIFIED after successful validation recovery.", skill_id)
+                else:
+                    consec_fail = 0
+
                 if curr_status == "candidate" and v_count >= auto_promote_threshold and confidence >= 0.8:
                     new_status = "verified"
                     logger.info("Skill '%s' promoted to VERIFIED after %d successful validations.", skill_id, v_count)
-                elif curr_status == "suspect" and s_count >= 2:
-                    new_status = "verified"
-                    logger.info("Skill '%s' restored to VERIFIED after successful validation recovery.", skill_id)
             else:
+                if consec_fail < 0:
+                    consec_fail = 0
+                consec_fail += 1
+
                 if curr_status == "verified":
                     if consec_fail >= 2:
                         # Repeated verified postcondition failures -> demote to suspect
@@ -826,7 +909,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             # 2. Restore ui_states
             for s in snapshot.get("ui_states", []):
                 conn.execute("""
-                    INSERT INTO ui_states (game_id, state_name, phash, confidence, evidence, metadata, source, first_seen, last_seen, occurrences)
+                    INSERT OR REPLACE INTO ui_states (game_id, state_name, phash, confidence, evidence, metadata, source, first_seen, last_seen, occurrences)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     s["game_id"], s["state_name"], s["phash"], s["confidence"],
@@ -837,7 +920,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             # 3. Restore navigation_transitions
             for t in snapshot.get("transitions", []):
                 conn.execute("""
-                    INSERT INTO navigation_transitions (
+                    INSERT OR REPLACE INTO navigation_transitions (
                         game_id, from_state, to_state, action_type, params, cost, success_count, fail_count, confidence, evidence, source, created_at, updated_at, status, consecutive_failures
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
@@ -851,7 +934,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             # 4. Restore learned_skills
             for sk in snapshot.get("learned_skills", []):
                 conn.execute("""
-                    INSERT INTO learned_skills (
+                    INSERT OR REPLACE INTO learned_skills (
                         skill_id, game_id, version, name, description, preconditions, steps, post_verification, status, validation_count, success_count, fail_count, confidence, source, created_at, updated_at, consecutive_failures, optimization_notes
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
@@ -865,7 +948,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             # 5. Restore selectors_memory
             for sel in snapshot.get("selectors", []):
                 conn.execute("""
-                    INSERT INTO selectors_memory (game_id, selector_id, state_name, selector_data, confidence, success_count, fail_count, last_verified, source, status, consecutive_failures)
+                    INSERT OR REPLACE INTO selectors_memory (game_id, selector_id, state_name, selector_data, confidence, success_count, fail_count, last_verified, source, status, consecutive_failures)
                     VALUES (?, ?, ?, ?, ?, 1, 0, ?, 'checkpoint', ?, 0)
                 """, (
                     game_id, sel["selector_id"], sel.get("state_name", "global"),
@@ -910,13 +993,22 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         now = time.time()
         with conn:
             if item_type == "skill":
-                cur = conn.execute("UPDATE learned_skills SET status = ?, updated_at = ? WHERE game_id = ? AND skill_id = ?", (new_status, now, game_id, item_id))
+                if new_status == "verified":
+                    cur = conn.execute("UPDATE learned_skills SET status = ?, consecutive_failures = 0, updated_at = ? WHERE game_id = ? AND skill_id = ?", (new_status, now, game_id, item_id))
+                else:
+                    cur = conn.execute("UPDATE learned_skills SET status = ?, updated_at = ? WHERE game_id = ? AND skill_id = ?", (new_status, now, game_id, item_id))
                 return cur.rowcount > 0
             elif item_type == "transition":
-                cur = conn.execute("UPDATE navigation_transitions SET status = ?, updated_at = ? WHERE game_id = ? AND id = ?", (new_status, now, game_id, int(item_id)))
+                if new_status == "verified":
+                    cur = conn.execute("UPDATE navigation_transitions SET status = ?, consecutive_failures = 0, updated_at = ? WHERE game_id = ? AND id = ?", (new_status, now, game_id, int(item_id)))
+                else:
+                    cur = conn.execute("UPDATE navigation_transitions SET status = ?, updated_at = ? WHERE game_id = ? AND id = ?", (new_status, now, game_id, int(item_id)))
                 return cur.rowcount > 0
             elif item_type == "selector":
-                cur = conn.execute("UPDATE selectors_memory SET status = ?, last_verified = ? WHERE game_id = ? AND selector_id = ?", (new_status, now, game_id, item_id))
+                if new_status == "verified":
+                    cur = conn.execute("UPDATE selectors_memory SET status = ?, consecutive_failures = 0, last_verified = ? WHERE game_id = ? AND selector_id = ?", (new_status, now, game_id, item_id))
+                else:
+                    cur = conn.execute("UPDATE selectors_memory SET status = ?, last_verified = ? WHERE game_id = ? AND selector_id = ?", (new_status, now, game_id, item_id))
                 return cur.rowcount > 0
             else:
                 raise ValueError(f"Unknown item_type '{item_type}'. Must be 'skill', 'transition', or 'selector'.")
@@ -1040,7 +1132,27 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
     def prune_temporary_screenshots(self, directory: Optional[str] = None, max_age_seconds: int = 3600) -> int:
         target_dirs = []
         if directory:
-            target_dirs.append(directory)
+            if not isinstance(directory, str) or not directory.strip():
+                raise ValueError("directory must be a non-empty string.")
+            
+            # Security Sandbox Validation: Ensure candidate directory resides inside workspace or allowed tmp
+            workspace_root = os.path.realpath(os.path.abspath(os.getcwd()))
+            tmp_root = os.path.realpath(os.path.abspath(tempfile.gettempdir()))
+            candidate = os.path.realpath(os.path.abspath(directory))
+            try:
+                in_workspace = os.path.commonpath([workspace_root, candidate]) == workspace_root
+            except ValueError:
+                in_workspace = False
+            try:
+                in_tmp = os.path.commonpath([tmp_root, candidate]) == tmp_root
+            except ValueError:
+                in_tmp = False
+
+            if not (in_workspace or in_tmp):
+                raise SafetyViolationError(
+                    f"Path traversal detected: directory '{directory}' escapes allowed workspace sandbox."
+                )
+            target_dirs.append(candidate)
         else:
             target_dirs.extend(["data/captures", "storage/screenshots"])
             if os.environ.get("UGM_CAPTURES_DIR"):

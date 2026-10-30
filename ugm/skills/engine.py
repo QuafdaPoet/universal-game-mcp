@@ -202,6 +202,23 @@ class SkillExecutionEngine:
         preconditions = skill_data.get("preconditions", {})
         post_verification = skill_data.get("post_verification", {})
 
+        if skill_data.get("status") == "rejected":
+            return SkillExecutionResult(
+                skill_id=skill_id,
+                game_id=resolved_game_id,
+                success=False,
+                status="rejected",
+                preconditions_met=False,
+                steps_executed=0,
+                steps_total=len(steps),
+                post_verification_passed=False,
+                dry_run=effective_dry_run,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"Skill '{skill_id}' has been REJECTED in knowledge lifecycle and cannot be executed.",
+                step_logs=[],
+                evidence={"status": "rejected"}
+            )
+
         # Step 2: Validate Action Primitives & Completeness
         for s in steps:
             action_name = s.get("action")
@@ -271,6 +288,8 @@ class SkillExecutionEngine:
             if not step_res.success:
                 latency = (time.perf_counter() - t0) * 1000.0
                 self._record_execution_history(resolved_game_id, skill_id, success=False, reason=step_res.message, duration_ms=latency, source="live" if not effective_dry_run else "synthetic_fixture")
+                if self.storage and not skill_data.get("is_curated"):
+                    self.storage.update_skill_stats(skill_id, success=False, is_execution_error=True, reason=step_res.message)
                 return SkillExecutionResult(
                     skill_id=skill_id,
                     game_id=resolved_game_id,
@@ -308,7 +327,7 @@ class SkillExecutionEngine:
 
         # Update stats if this is a learned skill
         if self.storage and not skill_data.get("is_curated"):
-            self.storage.update_skill_stats(skill_id, success=final_success)
+            self.storage.update_skill_stats(skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg)
 
         return SkillExecutionResult(
             skill_id=skill_id,

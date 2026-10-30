@@ -128,33 +128,39 @@ class SkillLearner:
         skill = self.storage.get_learned_skill(skill_id)
         if not skill:
             return False
-        conn = self.storage.db.get_connection()
-        with conn:
-            conn.execute("UPDATE learned_skills SET status = 'verified', updated_at = unixepoch('subsec') WHERE skill_id = ?", (skill_id,))
-        logger.info("Skill '%s' status updated to VERIFIED.", skill_id)
-        return True
+        return self.storage.update_knowledge_state(
+            game_id=skill.game_id,
+            item_type="skill",
+            item_id=skill_id,
+            new_status="verified",
+            reason="approved"
+        )
 
     def reject_skill(self, skill_id: str, reason: str = "") -> bool:
         """Marks a candidate skill as 'rejected'."""
         skill = self.storage.get_learned_skill(skill_id)
         if not skill:
             return False
-        conn = self.storage.db.get_connection()
-        with conn:
-            conn.execute("UPDATE learned_skills SET status = 'rejected', updated_at = unixepoch('subsec') WHERE skill_id = ?", (skill_id,))
-        logger.info("Skill '%s' status updated to REJECTED (reason: %s).", skill_id, reason)
-        return True
+        return self.storage.update_knowledge_state(
+            game_id=skill.game_id,
+            item_type="skill",
+            item_id=skill_id,
+            new_status="rejected",
+            reason=reason
+        )
 
     def mark_skill_suspect(self, skill_id: str, reason: str = "") -> bool:
         """Marks a previously verified skill as 'suspect' following unexpected failures."""
         skill = self.storage.get_learned_skill(skill_id)
         if not skill:
             return False
-        conn = self.storage.db.get_connection()
-        with conn:
-            conn.execute("UPDATE learned_skills SET status = 'suspect', updated_at = unixepoch('subsec') WHERE skill_id = ?", (skill_id,))
-        logger.info("Skill '%s' status updated to SUSPECT (reason: %s).", skill_id, reason)
-        return True
+        return self.storage.update_knowledge_state(
+            game_id=skill.game_id,
+            item_type="skill",
+            item_id=skill_id,
+            new_status="suspect",
+            reason=reason
+        )
 
     def optimize_skill(
         self,
@@ -164,6 +170,15 @@ class SkillLearner:
         new_version: Optional[str] = None
     ) -> bool:
         """Optimizes a skill with a refined sequence of steps and version bump."""
+        if not new_steps or not isinstance(new_steps, list):
+            raise ValueError(f"Cannot optimize skill '{skill_id}': step sequence cannot be empty.")
+
+        existing = self.engine.lookup_skill(skill_id)
+        if existing and existing.get("is_curated"):
+            raise SafetyViolationError(
+                f"Cannot modify curated Game Skill '{skill_id}'. Curated skills are protected."
+            )
+
         # Validate action primitives
         for idx, step in enumerate(new_steps):
             act = step.get("action")

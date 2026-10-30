@@ -70,7 +70,8 @@ class UIExplorer:
         verifier: ActionVerifier,
         ocr_engine: BaseOCREngine,
         icon_detector: IconDetector,
-        storage: Optional[PersistentKnowledgeStorage] = None
+        storage: Optional[PersistentKnowledgeStorage] = None,
+        max_probe_depth: int = 100
     ):
         self.capture_manager = capture_manager
         self.input_controller = input_controller
@@ -78,6 +79,13 @@ class UIExplorer:
         self.ocr_engine = ocr_engine
         self.icon_detector = icon_detector
         self.storage = storage
+        self.max_probe_depth = max_probe_depth
+        self.probe_count = 0
+        self.active_game_id: Optional[str] = None
+
+    def reset_probe_budget(self) -> None:
+        """Resets the exploration probe step counter."""
+        self.probe_count = 0
 
     def discover_interactive_elements(
         self,
@@ -90,10 +98,13 @@ class UIExplorer:
         clickable tabs, visual anchors, and layout clusters.
         """
         candidates: List[UIElementCandidate] = []
-        if frame is None:
+        if frame is None or getattr(frame, "size", 1) == 0:
             return candidates
 
         h, w = frame.shape[:2]
+        if h == 0 or w == 0:
+            return candidates
+
         crop_x = int(roi.x * w) if roi else 0
         crop_y = int(roi.y * h) if roi else 0
         crop_w = int(roi.width * w) if roi else w
@@ -139,10 +150,18 @@ class UIExplorer:
                 if hasattr(cv2, "cvtColor") and hasattr(cv2, "threshold") and hasattr(cv2, "findContours"):
                     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
                     _, thresh = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY)
-                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cnt_res = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    contours = cnt_res[0] if (isinstance(cnt_res, (list, tuple)) and len(cnt_res) == 2) else (cnt_res[1] if isinstance(cnt_res, (list, tuple)) and len(cnt_res) == 3 else cnt_res)
+                    if isinstance(contours, tuple):
+                        contours = list(contours)
+                    if not isinstance(contours, list):
+                        contours = []
 
                     for c_idx, cnt in enumerate(contours[:20]):
-                        bx, by, bw, bh = cv2.boundingRect(cnt)
+                        if isinstance(cnt, (list, tuple)) and len(cnt) == 4:
+                            bx, by, bw, bh = cnt
+                        else:
+                            bx, by, bw, bh = cv2.boundingRect(cnt)
                         # Filter by realistic button dimensions (width 40-400px, height 15-80px)
                         if 40 <= bw <= 400 and 15 <= bh <= 80:
                             abs_x = crop_x + bx
@@ -176,7 +195,7 @@ class UIExplorer:
                 logger.debug("Explorer shape scan notice: %s", e)
 
         # Fallback anchor if no candidates detected (ensures exploration baseline)
-        if not candidates and scan_mode in ("all", "buttons"):
+        if not candidates and scan_mode in ("all", "buttons", "shapes"):
             candidates.append(UIElementCandidate(
                 candidate_id="elem_anchor_center",
                 element_type="button",
@@ -197,18 +216,28 @@ class UIExplorer:
         expected_roi: Optional[NormalizedRect] = None,
         timeout_s: float = 5.0,
         dry_run: bool = False,
-        revert_on_fail: bool = False
+        revert_on_fail: bool = False,
+        game_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Executes a bounded Observe-Act-Verify probe step.
         Dispatches action, measures visual/textual delta, and classifies result.
         """
         safety_manager.check_safety()
+        if self.probe_count >= self.max_probe_depth:
+            raise SafetyViolationError(
+                f"Exploration probe budget exceeded ({self.probe_count}/{self.max_probe_depth} steps). "
+                f"Review observations or reset probe budget before continuing."
+            )
+        self.probe_count += 1
+
         p = params or {}
         t0 = time.perf_counter()
 
-        # Step 1: Capture baseline pre-action frame
-        pre_frame = self.capture_manager.capture()
+        win = getattr(self.input_controller, "window_manager", None) and self.input_controller.window_manager.current_window
+
+        # Step 1: Capture baseline pre-action frame cropped to game client rect
+        pre_frame = self.capture_manager.capture(window=win)
 
         # Step 2: Dispatch candidate action safely
         executed = True
@@ -221,8 +250,10 @@ class UIExplorer:
                 res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
                 executed = res.get("executed", True) if isinstance(res, dict) else getattr(res, "executed", True)
             elif act_norm in ("click_target", "click"):
-                x = p.get("x", 0.5)
-                y = p.get("y", 0.5)
+                x = float(p.get("x", 0.5))
+                y = float(p.get("y", 0.5))
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                    raise SafetyViolationError(f"Normalized click coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
                 button = p.get("button", "left")
                 clicks = p.get("clicks", 1)
                 res = self.input_controller.click(norm_x=x, norm_y=y, button=button, clicks=clicks, dry_run=dry_run)
@@ -231,8 +262,10 @@ class UIExplorer:
                 if not executed:
                     exec_error = getattr(res, "reason", "Click failed")
             elif act_norm in ("hover", "hover_target"):
-                x = p.get("x", 0.5)
-                y = p.get("y", 0.5)
+                x = float(p.get("x", 0.5))
+                y = float(p.get("y", 0.5))
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                    raise SafetyViolationError(f"Normalized hover coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
                 duration = p.get("duration_ms", 400)
                 res = self.input_controller.hover(norm_x=x, norm_y=y, duration_ms=duration, dry_run=dry_run)
                 executed = res[2] if isinstance(res, tuple) and len(res) >= 3 else True
@@ -243,6 +276,9 @@ class UIExplorer:
                 executed = True
             else:
                 raise ValueError(f"Disallowed probe action: '{action}'. Allowed: press_keys, press_key, click_target, click, hover, wait")
+        except (EmergencyStopTriggered, SafetyViolationError):
+            # Inviolable safety: propagate immediately, never swallow killswitch or violations
+            raise
         except Exception as e:
             executed = False
             exec_error = str(e)
@@ -252,8 +288,8 @@ class UIExplorer:
         if not dry_run:
             time.sleep(0.08)
 
-        # Step 4: Capture post-action frame
-        post_frame = self.capture_manager.capture()
+        # Step 4: Capture post-action frame cropped to game client rect
+        post_frame = self.capture_manager.capture(window=win)
 
         # Step 5: Diff & Verification Analysis
         diff_res: VerificationResult = self.verifier.verify_selection(
@@ -294,11 +330,26 @@ class UIExplorer:
         # Optional Revert on Failure (Safe Retreat)
         reverted = False
         if revert_on_fail and (not visual_changed or exec_error):
+            if not safety_manager.is_emergency_stopped:
+                try:
+                    self.input_controller.press_keys(keys=["escape"], duration_ms=50, dry_run=dry_run)
+                    reverted = True
+                except Exception:
+                    pass
+
+        # Record probe attempt into persistent action history
+        effective_gid = game_id or self.active_game_id or "generic"
+        if self.storage is not None:
             try:
-                self.input_controller.press_keys(keys=["escape"], duration_ms=50, dry_run=dry_run)
-                reverted = True
-            except Exception:
-                pass
+                self.storage.record_action_history(
+                    game_id=effective_gid,
+                    action_name=f"probe_{act_norm}",
+                    params=p,
+                    success=(visual_changed and not exec_error),
+                    duration_ms=latency_ms
+                )
+            except Exception as e:
+                logger.debug("Failed to record probe action history: %s", e)
 
         return {
             "action": action,
@@ -318,6 +369,7 @@ class UIExplorer:
             "new_text_detected": new_text_found,
             "latency_ms": round(latency_ms, 2),
             "reverted": reverted,
+            "probe_step": self.probe_count,
             "message": f"Probe {action}: outcome={outcome}, diff_ratio={round(diff_ratio, 4)}"
         }
 

@@ -429,8 +429,8 @@ def install_windows_shims():
             m_cv2.absdiff = mock_absdiff
             m_cv2.threshold = lambda src, thresh, maxval, type: (thresh, src)
             m_cv2.resize = mock_resize
-            m_cv2.findContours = lambda image, mode, method: ([], None)
-            m_cv2.boundingRect = lambda array: (0, 0, 100, 50)
+            m_cv2.findContours = lambda image, mode, method: getattr(image, "_mock_contours", ([], None))
+            m_cv2.boundingRect = lambda array: (tuple(array) if (isinstance(array, (list, tuple)) and len(array) == 4) else (0, 0, 100, 50))
             m_cv2.circle = lambda img, center, radius, color, thickness=1: None
             m_cv2.rectangle = mock_rectangle
             m_cv2.putText = lambda img, text, org, fontFace, fontScale, color, thickness=1: None

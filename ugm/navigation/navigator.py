@@ -182,7 +182,8 @@ class UINavigator:
                     action_type=edge.trigger_action,
                     params=edge.parameters,
                     success=False,
-                    source="live" if not effective_dry_run else "synthetic_fixture"
+                    source="live" if not effective_dry_run else "synthetic_fixture",
+                    is_execution_error=True
                 )
                 return NavigationResult(
                     success=False,
@@ -231,7 +232,8 @@ class UINavigator:
                 action_type=edge.trigger_action,
                 params=edge.parameters,
                 success=step_verified,
-                source="live" if not effective_dry_run else "synthetic_fixture"
+                source="live" if not effective_dry_run else "synthetic_fixture",
+                is_execution_error=False
             )
 
             if not step_verified:

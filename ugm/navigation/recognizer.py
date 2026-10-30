@@ -73,7 +73,7 @@ class UIStateRecognizer:
         phash = compute_dhash(frame)
         signals: Dict[str, Any] = {}
         candidate_scores: Dict[str, float] = {}
-        evidence: Dict[str, Any] = {"phash": phash}
+        evidence: Dict[str, Any] = {"phash": phash, "game_id": game_id}
 
         h, w = frame.shape[:2]
 
@@ -250,6 +250,7 @@ class UIStateRecognizer:
             signals["text_item_count"] = len(full_ocr.items)
             prominent = [i.text.strip() for i in full_ocr.items[:8] if len(i.text.strip()) > 2]
             signals["prominent_text"] = prominent
+            evidence["prominent_text"] = prominent
 
             # Match against registered states in persistent storage
             if self.storage and prominent:
@@ -259,8 +260,8 @@ class UIStateRecognizer:
                     k_ev = ks.evidence or {}
                     k_prom = k_ev.get("prominent_text", [])
                     if k_prom:
-                        # Overlap ratio
-                        matches = sum(1 for p in prominent if any(p.lower() in kp.lower() or kp.lower() in p.lower() for kp in k_prom))
+                        # Overlap ratio: count how many anchor keywords from known state (k_prom) are found in observed text
+                        matches = sum(1 for kp in k_prom if any(kp.lower() in p.lower() or p.lower() in kp.lower() for p in prominent))
                         overlap_ratio = matches / max(1, len(k_prom))
                         if overlap_ratio >= 0.5:
                             score = round(0.5 + (overlap_ratio * 0.4), 3)
