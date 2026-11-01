@@ -77,7 +77,9 @@ class UGMContext:
         offline_fixture: Optional[str] = None,
         ocr_backend: str = "rapidocr",
         skills_pack_dir: Optional[str] = "game_skills/hoi4",
-        db_path: Optional[str] = None
+        db_path: Optional[str] = None,
+        fixture_title: Optional[str] = None,
+        fixture_process_name: Optional[str] = None
     ):
         self.window_manager = WindowManager()
         self.capture_manager = CaptureManager()
@@ -171,7 +173,7 @@ class UGMContext:
         self.explorer.active_game_id = self.active_game_id
 
         if offline_fixture and os.path.exists(offline_fixture):
-            self.setup_offline_fixture(offline_fixture)
+            self.setup_offline_fixture(offline_fixture, title=fixture_title, process_name=fixture_process_name)
 
     def discover_and_attach(
         self,
@@ -326,7 +328,12 @@ class UGMContext:
         graph.register_edge(NavigationEdge("main_view", "paused", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
         graph.register_edge(NavigationEdge("paused", "main_view", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
 
-    def setup_offline_fixture(self, fixture_path: str) -> None:
+    def setup_offline_fixture(
+        self,
+        fixture_path: str,
+        title: Optional[str] = None,
+        process_name: Optional[str] = None
+    ) -> None:
         """Sets up a mock game window and fixture image for offline operation."""
         img = cv2.imread(fixture_path)
         if img is None:
@@ -334,8 +341,8 @@ class UGMContext:
         h, w = img.shape[:2]
         mock_win = WindowInfo(
             hwnd=9999,
-            title="Hearts of Iron IV (Mock Fixture)",
-            process_name="hoi4.exe",
+            title=title or "Hearts of Iron IV (Mock Fixture)",
+            process_name=process_name or "hoi4.exe",
             pid=1234,
             x=0,
             y=0,

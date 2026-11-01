@@ -839,11 +839,27 @@ def test_adaptive_ui_anchor_matching(v2_test_env):
         evidence={"prominent_text": ["Treaty", "Munich", "INFANTRY"]}
     )
 
+    from ugm.core.ocr import OCRResult, OCRItem
+    from ugm.core.types import BoundingBox, NormalizedRect
+    dummy_box = BoundingBox(0, 0, 50, 20)
+    dummy_norm = NormalizedRect(0.0, 0.0, 0.05, 0.02)
+    mock_ocr = OCRResult(
+        items=[
+            OCRItem("Treaty", 0.95, dummy_box, dummy_norm),
+            OCRItem("Munich", 0.95, dummy_box, dummy_norm),
+            OCRItem("INFANTRY", 0.95, dummy_box, dummy_norm),
+        ],
+        full_text="Treaty Munich INFANTRY",
+        engine="mock",
+        latency_ms=1.0
+    )
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
-    assert det.state_name == "research_hub"
-    assert det.confidence >= 0.70
-    assert "anchor_match" in det.signals
+    from unittest.mock import patch
+    with patch.object(ctx.ocr_engine, "read_text", return_value=mock_ocr):
+        det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
+        assert det.state_name == "research_hub"
+        assert det.confidence >= 0.70
+        assert "anchor_match" in det.signals
 
 
 @pytest.mark.asyncio

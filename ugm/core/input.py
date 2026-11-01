@@ -129,6 +129,15 @@ class InputController:
 
             if cursor_x is not None and cursor_y is not None:
                 if 0 <= cursor_x <= 5 and 0 <= cursor_y <= 5:
+                    if sys.platform == "win32" and not getattr(getattr(pydirectinput, "position", None), "assert_called", None):
+                        try:
+                            import ctypes
+                            from ctypes import wintypes
+                            pt = wintypes.POINT(-1, -1)
+                            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)) == 0:
+                                return
+                        except Exception:
+                            pass
                     safety_manager.trigger_emergency_stop(
                         "Hardware corner abort triggered: mouse cursor within 5px of (0,0)."
                     )

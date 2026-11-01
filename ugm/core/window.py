@@ -82,8 +82,7 @@ class WindowManager:
             if matches_title and matches_proc:
                 self._current_window = self._mock_window
                 return self._mock_window
-            elif sys.platform != "win32":
-                return None
+            return None
 
         if sys.platform != "win32":
             logger.warning("Native window management is only supported on Windows.")
@@ -136,7 +135,10 @@ class WindowManager:
                 logger.debug("Exception in enum_windows_callback for hwnd %s: %s", hwnd, e)
                 return True
 
-        win32gui.EnumWindows(enum_windows_callback, None)
+        try:
+            win32gui.EnumWindows(enum_windows_callback, None)
+        except Exception as e:
+            logger.debug("EnumWindows call ended or timed out: %s", e)
 
         if not matches:
             logger.warning("No window found matching title='%s', process='%s'", window_title, process_name)

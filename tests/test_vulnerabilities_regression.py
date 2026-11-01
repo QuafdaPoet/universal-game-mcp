@@ -46,7 +46,7 @@ class TestVulnerabilitiesRegression(unittest.TestCase):
     def setUp(self):
         """Prepare clean isolated temporary workspace and reset safety manager."""
         safety_manager.reset_emergency_stop()
-        self.test_dir = tempfile.mkdtemp(prefix="ugm_sec_test_")
+        self.test_dir = os.path.realpath(tempfile.mkdtemp(prefix="ugm_sec_test_"))
         self.mock_win = WindowInfo(
             hwnd=1001,
             title="Hearts of Iron IV",
