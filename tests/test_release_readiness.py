@@ -69,3 +69,57 @@ async def test_text_verification_and_cropped_baseline(tmp_path, monkeypatch):
     backend.set_frame(changed)
     result = await call("verify_state", {"roi": roi, "pre_capture_id": capture["capture_id"]})
     assert result["verified"] and result["diff_ratio"] == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rollback_invalidates_cached_navigator(tmp_path):
+    from ugm.server import UGMContext, create_server
+    from ugm.skills.contracts import NavigationEdge
+
+    ctx = UGMContext(offline_fixture="tests/fixtures/hoi4_topbar.png", db_path=str(tmp_path / "rollback.db"))
+    game_id = "hoi4"
+    server = create_server(ctx)
+    checkpoint = ctx.storage.create_checkpoint(game_id, "before bad route")
+    cached = ctx.get_navigator(game_id)
+    cached.graph.register_edge(NavigationEdge("main_map", "spurious_menu", "wait", {}, cost=1.0))
+    assert cached.graph.plan_route("main_map", "spurious_menu").found
+
+    # A failed rollback should not invalidate the usable cache.
+    await server.call_tool("rollback_knowledge_checkpoint", {"game_id": game_id, "checkpoint_id": -1})
+    assert ctx.get_navigator(game_id) is cached
+
+    await server.call_tool("rollback_knowledge_checkpoint", {"game_id": game_id, "checkpoint_id": checkpoint})
+    refreshed = ctx.get_navigator(game_id)
+    assert refreshed is not cached
+    assert refreshed.graph is ctx.get_navigation_graph(game_id)
+    assert not refreshed.graph.plan_route("main_map", "spurious_menu").found
+    assert refreshed.graph.plan_route("main_map", "production").found
+
+
+@pytest.mark.asyncio
+async def test_unreachable_mcp_route_has_json_safe_cost(tmp_path):
+    from ugm.server import UGMContext, create_server
+
+    ctx = UGMContext(offline_fixture="tests/fixtures/hoi4_topbar.png", db_path=str(tmp_path / "route.db"))
+    server = create_server(ctx)
+    result = await server.call_tool("get_navigation_plan", {
+        "start_state": "main_map", "target_state": "absent_menu", "game_id": "hoi4",
+    })
+    assert not result.is_error
+    payload = result.structured_content
+    payload = payload.get("result", payload)
+    assert payload["found"] is False
+    assert payload["total_cost"] is None
+    from json import loads
+
+    def reject_non_json_constant(token):
+        raise ValueError(f"Invalid JSON constant: {token}")
+
+    assert loads(result.content[0].text, parse_constant=reject_non_json_constant)["total_cost"] is None
+
+
+def test_explicit_mock_ocr_backend_starts(tmp_path):
+    from ugm.core.ocr import MockOCREngine
+
+    ctx = UGMContext(offline_fixture=str(FIXTURE), ocr_backend="mock", db_path=tmp_path / "mock.db")
+    assert isinstance(ctx.ocr_engine, MockOCREngine)

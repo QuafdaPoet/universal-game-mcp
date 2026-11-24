@@ -254,12 +254,12 @@ class InputController:
 
         # Ensure window is focused if auto_focus is enabled
         effective_dry_run = self.is_dry_run_active(dry_run)
-        if self.auto_focus and not win.is_focused:
+        if self.auto_focus and not win.is_focused and not effective_dry_run:
             focused = self.window_manager.focus_window(win.hwnd)
             if focused:
                 # Refresh window info
                 win = self.window_manager.current_window or win
-            elif not effective_dry_run:
+            else:
                 logger.warning("Could not focus target game window '%s'", win.title)
 
         # Map normalized [0, 1] to window client area
@@ -341,6 +341,7 @@ class InputController:
                 executed=False,
                 verification_passed=None,
                 reason=f"Safety check rejected click: {e}",
+                status="failed",
                 latency_ms=(time.perf_counter() - t0) * 1000.0
             )
 

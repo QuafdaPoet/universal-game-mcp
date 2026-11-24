@@ -76,11 +76,11 @@ Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64, inte
 ```
 
 ### Core Subsystems
-1. **Autonomous Exploration (`ugm.core.explorer`)**: Generic element discovery, interactive contour and text bounding box grouping, non-destructive probing actions, and layout zone segmentation.
-2. **Persistent Knowledge & Lifecycle (`ugm.memory.database`, `ugm.memory.storage`)**: SQLite with WAL mode, point-in-time snapshot checkpoints, versioning, rollback, perceptual hash indexing (dHash), and 4-state knowledge promotion.
+1. **Autonomous Exploration (`ugm.core.explorer`)**: Heuristic text and shape candidates plus action probes. A detected shape does not establish interactivity, and a live probe can change game state.
+2. **Persistent Knowledge & Lifecycle (`ugm.memory.database`, `ugm.memory.storage`)**: SQLite with WAL, knowledge checkpoints, rollback, perceptual hashing (dHash), and four lifecycle statuses. See the reliability backlog for snapshot-integrity and revision gates.
 3. **Multi-Signal UI State Recognizer (`ugm.navigation.recognizer`)**: Adaptive layout classifier combining perceptual dHash, prominent text anchors, panel geometry, and confidence metrics (`known`, `ambiguous`, `unknown`).
-4. **Navigation Graph (`ugm.navigation.graph`, `ugm.navigation.navigator`)**: Dynamic directed graph where nodes are UI states and edges are verified executable actions. Plans lowest-cost routes via Dijkstra with automatic replanning on mismatch.
-5. **Verified Self-Learning Engine (`ugm.skills.learner`)**: Procedural learning pipeline: **Observe → Identify → Plan → Act → Verify → Learn → Reuse**. Curated packs remain read-only; learned skills are incrementally validated and promoted.
+4. **Navigation Graph (`ugm.navigation.graph`, `ugm.navigation.navigator`)**: Directed graph of UI states and recorded or curated transitions. Dijkstra plans a low-cost route. A proposed route is not proof that every edge is verified for the current game session.
+5. **Skill Learning (`ugm.skills.learner`)**: Accepts skill definitions from the external agent, tracks outcomes, and separates learned records from curated packs. End-to-end zero-knowledge learning is not yet validated in a real game.
 6. **Skill Execution Engine (`ugm.skills.engine`)**: Sandboxed runtime with allowlisted action primitives (`press_keys`, `click_target`, `locate_and_click`, `click_selector`, `hover`, `wait`, `verify_state`), precondition/postcondition checks, and emergency killswitch.
 7. **Cross-Game Concept Store (`ugm.memory.storage`)**: Registers and queries abstract strategy patterns (e.g., economy loops, pause toggles, production queues) shared across multiple games.
 
@@ -113,7 +113,7 @@ game_skills/
 ```
 
 - **Curated Skill Protection**: Curated skills in `game_skills/` are read-only at runtime and can never be overwritten by self-learning calls.
-- **Procedural Promotion**: Learned skills start as `candidate` and promote to `verified` after ≥ 3 successful validations with confidence ≥ 0.85.
+- **Procedural Promotion**: Learned skills have lifecycle statuses. Until the evidence and revision gates in the backlog pass, those statuses are not proof of a reproducible gameplay rule.
 - **Security Sandboxing**: Execution of arbitrary shell scripts or code is blocked; only allowlisted primitives are permitted.
 
 ---
@@ -163,16 +163,18 @@ python scripts/demo_offline_sim.py
 python -m pip wheel --no-deps -w dist .
 ```
 
-The benchmark is synthetic, not a live-game performance promise. Keep generated fixture changes and personal database files out of commits unless intentionally updating fixtures.
+The benchmark is synthetic, not a live-game performance promise. For a no-input Windows capture/OCR procedure, current limitations, and the test matrix, see the [reliability backlog](docs/reliability-backlog.md). Keep generated fixture changes and personal database files out of commits unless intentionally updating fixtures.
 
 ---
 
 ## 🔒 Safety and Anti-Cheat Policies
 
 - **Offline & Single-Player Only**: Exclusively intended for single-player, offline strategy/simulation games.
-- **Strict Anti-Cheat Blocker**: Active process checks immediately abort and trigger emergency stop if anti-cheat services (EAC, BattlEye, Vanguard, Ricochet, etc.) are detected.
+- **Anti-Cheat Blocker**: Input checks block recognized anti-cheat processes. This is a safeguard, not detection coverage for every online game or protection against account penalties.
 - **Server-Wide Dry-Run**: When launched with `--dry-run`, tool calls cannot override it with `dry_run=False`.
-- **Emergency Stop Killswitch**: The `emergency_stop` tool instantly locks out mouse and keyboard inputs.
+- **Knowledge isolation**: Fixture and server-wide dry-run sessions use a separate SQLite file (`<db-path>.simulation`); live sessions cannot open it. A per-call dry-run does not update live observations, action history, skill validation, or navigation reliability.
+- **Evidence levels**: `simulated` means no live action evidence; `observed` means a signal such as OCR or a visual difference was detected; `verified` means an explicit live check matched. A dry-run skill or navigation result may indicate acceptance (`success`), but does not indicate input execution or postcondition verification. A probe's visual difference alone does not establish a gameplay rule.
+- **Emergency Stop**: The `emergency_stop` tool blocks subsequent UGM hardware actions. It does not undo an action already delivered to the game.
 
 ---
 
