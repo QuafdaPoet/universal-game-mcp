@@ -484,49 +484,68 @@ def install_windows_shims():
     # mcp Mock (if missing on host OS)
     # ------------------------------------------------------------------------
     if "mcp" not in sys.modules:
-        m_mcp = types.ModuleType("mcp")
-        m_server = types.ModuleType("mcp.server")
-        m_mcpserver = types.ModuleType("mcp.server.mcpserver")
+        try:
+            import mcp
+            from mcp.server.mcpserver import MCPServer
+            from mcp.server.mcpserver.exceptions import UnexpectedToolError
 
-        class MockMCPServer:
-            def __init__(self, name="universal-game-mcp", version="1.5.0", instructions=""):
-                self.name = name
-                self.version = version
-                self.instructions = instructions
-                self._tools = {}
+            _orig_call_tool = MCPServer.call_tool
 
-            def tool(self, *args, **kwargs):
-                def decorator(fn):
-                    self._tools[fn.__name__] = fn
-                    return fn
-                return decorator
+            async def _unwrapping_call_tool(self, name, arguments=None, context=None, **kwargs):
+                try:
+                    return await _orig_call_tool(self, name, arguments=arguments, context=context, **kwargs)
+                except UnexpectedToolError as err:
+                    if err.__cause__:
+                        raise err.__cause__ from None
+                    raise
 
-            async def list_tools(self):
-                return [type("Tool", (), {"name": name}) for name in self._tools.keys()]
+            MCPServer.call_tool = _unwrapping_call_tool
+        except ImportError:
+            m_mcp = types.ModuleType("mcp")
+            m_server = types.ModuleType("mcp.server")
+            m_mcpserver = types.ModuleType("mcp.server.mcpserver")
 
-            async def call_tool(self, name, arguments=None):
-                import json
-                import inspect
-                fn = self._tools.get(name)
-                if not fn:
-                    raise ValueError(f"Tool {name} not found")
-                args = arguments or {}
-                res = fn(**args)
-                if inspect.isawaitable(res):
-                    res = await res
-                if isinstance(res, dict):
-                    res = json.loads(json.dumps(res))
-                return type("ToolResult", (), {
-                    "structured_content": {"result": res} if isinstance(res, dict) else res,
-                    "content": [type("Content", (), {"text": json.dumps(res) if isinstance(res, dict) else str(res)})()]
-                })()
+            class MockMCPServer:
+                def __init__(self, name="universal-game-mcp", version="1.5.0", instructions=""):
+                    self.name = name
+                    self.version = version
+                    self.instructions = instructions
+                    self._tools = {}
 
-        m_mcpserver.MCPServer = MockMCPServer
-        m_server.mcpserver = m_mcpserver
-        m_mcp.server = m_server
-        sys.modules["mcp"] = m_mcp
-        sys.modules["mcp.server"] = m_server
-        sys.modules["mcp.server.mcpserver"] = m_mcpserver
+                def tool(self, *args, **kwargs):
+                    def decorator(fn):
+                        self._tools[fn.__name__] = fn
+                        return fn
+                    return decorator
+
+                async def list_tools(self):
+                    return [type("Tool", (), {"name": name}) for name in self._tools.keys()]
+
+                async def call_tool(self, name, arguments=None):
+                    import json
+                    import inspect
+                    fn = self._tools.get(name)
+                    if not fn:
+                        raise ValueError(f"Tool {name} not found")
+                    args = arguments or {}
+                    res = fn(**args)
+                    if inspect.isawaitable(res):
+                        res = await res
+                    if isinstance(res, dict):
+                        res = json.loads(json.dumps(res))
+                    return type("ToolResult", (), {
+                        "is_error": False,
+                        "meta": None,
+                        "structured_content": {"result": res} if isinstance(res, dict) else res,
+                        "content": [type("Content", (), {"text": json.dumps(res) if isinstance(res, dict) else str(res)})()]
+                    })()
+
+            m_mcpserver.MCPServer = MockMCPServer
+            m_server.mcpserver = m_mcpserver
+            m_mcp.server = m_server
+            sys.modules["mcp"] = m_mcp
+            sys.modules["mcp.server"] = m_server
+            sys.modules["mcp.server.mcpserver"] = m_mcpserver
 
     # ------------------------------------------------------------------------
     # psutil Mock (if missing on host OS)
@@ -727,10 +746,28 @@ try:
     import pytest
 
     @pytest.fixture(autouse=True)
-    def clean_safety():
+    def clean_safety(monkeypatch):
         """Ensures the safety manager emergency stop state is clean before and after each test."""
         from ugm.core.safety import safety_manager
         safety_manager.reset_emergency_stop()
+        # Protect test suite from host machine background anti-cheat services (e.g. vgc.exe)
+        try:
+            import psutil
+            real_process_iter = psutil.process_iter
+
+            def safe_process_iter(attrs=None):
+                for proc in real_process_iter(attrs):
+                    try:
+                        pname = proc.info["name"] if attrs and "name" in attrs and hasattr(proc, "info") and "name" in proc.info else proc.name()
+                        if any(b.lower() in pname.lower() for b in safety_manager._anti_cheat_blacklisted):
+                            continue
+                    except Exception:
+                        pass
+                    yield proc
+
+            monkeypatch.setattr(psutil, "process_iter", safe_process_iter)
+        except Exception:
+            pass
         yield
         safety_manager.reset_emergency_stop()
 
