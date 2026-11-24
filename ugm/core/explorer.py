@@ -105,10 +105,19 @@ class UIExplorer:
         if h == 0 or w == 0:
             return candidates
 
-        crop_x = int(roi.x * w) if roi else 0
-        crop_y = int(roi.y * h) if roi else 0
-        crop_w = int(roi.width * w) if roi else w
-        crop_h = int(roi.height * h) if roi else h
+        if roi is not None:
+            if not (0 <= roi.x < roi.x + roi.width <= 1 and 0 <= roi.y < roi.y + roi.height <= 1):
+                raise ValueError("Exploration ROI must fit inside the frame and have positive width and height.")
+            bounds = roi.to_pixel(w, h)
+            crop_x, crop_y, crop_w, crop_h = bounds.x, bounds.y, bounds.width, bounds.height
+        else:
+            crop_x, crop_y, crop_w, crop_h = 0, 0, w, h
+
+        crop = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
+        # Some OpenCV inputs make a bright, empty ROI look like one large
+        # rectangle. No contrast means there is nothing to ground a proposal.
+        if not crop.size or not np.any(crop != crop[0, 0]):
+            return candidates
 
         # ----------------------------------------------------
         # 1. OCR-driven text element discovery
@@ -146,7 +155,6 @@ class UIExplorer:
         # ----------------------------------------------------
         if scan_mode in ("all", "shapes", "buttons"):
             try:
-                crop = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
                 if hasattr(cv2, "cvtColor") and hasattr(cv2, "threshold") and hasattr(cv2, "findContours"):
                     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
                     _, thresh = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY)
@@ -162,6 +170,8 @@ class UIExplorer:
                             bx, by, bw, bh = cnt
                         else:
                             bx, by, bw, bh = cv2.boundingRect(cnt)
+                        if bw == crop_w and bh == crop_h:
+                            continue
                         # Filter by realistic button dimensions (width 40-400px, height 15-80px)
                         if 40 <= bw <= 400 and 15 <= bh <= 80:
                             abs_x = crop_x + bx
@@ -194,19 +204,6 @@ class UIExplorer:
             except Exception as e:
                 logger.debug("Explorer shape scan notice: %s", e)
 
-        # Fallback anchor if no candidates detected (ensures exploration baseline)
-        if not candidates and scan_mode in ("all", "buttons", "shapes"):
-            candidates.append(UIElementCandidate(
-                candidate_id="elem_anchor_center",
-                element_type="button",
-                bbox=NormalizedRect(x=0.4, y=0.45, width=0.2, height=0.1),
-                center=(0.5, 0.5),
-                text=None,
-                suggested_action="click_target",
-                confidence=0.5,
-                details={"source": "fallback_center_anchor"}
-            ))
-
         return candidates
 
     def probe_action(
@@ -232,12 +229,13 @@ class UIExplorer:
         self.probe_count += 1
 
         p = params or {}
+        effective_dry_run = self.input_controller.is_dry_run_active(dry_run)
         t0 = time.perf_counter()
 
         win = getattr(self.input_controller, "window_manager", None) and self.input_controller.window_manager.current_window
 
         # Step 1: Capture baseline pre-action frame cropped to game client rect
-        pre_frame = self.capture_manager.capture(window=win)
+        pre_frame = None if effective_dry_run else self.capture_manager.capture(window=win)
 
         # Step 2: Dispatch candidate action safely
         executed = True
@@ -247,8 +245,11 @@ class UIExplorer:
             if act_norm in ("press_keys", "press_key"):
                 keys = p.get("keys") or ([p["key"]] if "key" in p else [])
                 duration = p.get("duration_ms", 50)
-                res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
-                executed = res.get("executed", True) if isinstance(res, dict) else getattr(res, "executed", True)
+                res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=effective_dry_run)
+                dispatched = res.get("success", False) if isinstance(res, dict) else res.success
+                executed = dispatched
+                if not dispatched:
+                    exec_error = res.get("message", "Key press failed") if isinstance(res, dict) else res.message
             elif act_norm in ("click_target", "click"):
                 x = float(p.get("x", 0.5))
                 y = float(p.get("y", 0.5))
@@ -256,9 +257,8 @@ class UIExplorer:
                     raise SafetyViolationError(f"Normalized click coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
                 button = p.get("button", "left")
                 clicks = p.get("clicks", 1)
-                res = self.input_controller.click(norm_x=x, norm_y=y, button=button, clicks=clicks, dry_run=dry_run)
-                succ = getattr(res, "status", None) == "success" or getattr(res, "executed", False)
-                executed = True if (dry_run or succ) else False
+                res = self.input_controller.click(norm_x=x, norm_y=y, button=button, clicks=clicks, dry_run=effective_dry_run)
+                executed = res.executed or (effective_dry_run and res.dry_run and res.status == "success")
                 if not executed:
                     exec_error = getattr(res, "reason", "Click failed")
             elif act_norm in ("hover", "hover_target"):
@@ -267,11 +267,13 @@ class UIExplorer:
                 if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
                     raise SafetyViolationError(f"Normalized hover coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
                 duration = p.get("duration_ms", 400)
-                res = self.input_controller.hover(norm_x=x, norm_y=y, duration_ms=duration, dry_run=dry_run)
-                executed = res[2] if isinstance(res, tuple) and len(res) >= 3 else True
+                res = self.input_controller.hover(norm_x=x, norm_y=y, duration_ms=duration, dry_run=effective_dry_run)
+                executed = res[2] or effective_dry_run
+                if not executed:
+                    exec_error = "Hover failed"
             elif act_norm == "wait":
                 duration_s = min(2.0, max(0.05, float(p.get("duration_s", 0.2))))
-                if not dry_run:
+                if not effective_dry_run:
                     time.sleep(duration_s)
                 executed = True
             else:
@@ -284,28 +286,21 @@ class UIExplorer:
             exec_error = str(e)
             logger.warning("Probe action '%s' execution error: %s", action, e)
 
-        # Step 3: Stabilization delay
-        if not dry_run:
+        # Do not manufacture a delta or OCR text when no input was dispatched.
+        diff_ratio = 0.0
+        visual_changed = False
+        post_frame = None
+        if executed and not effective_dry_run:
             time.sleep(0.08)
-
-        # Step 4: Capture post-action frame cropped to game client rect
-        post_frame = self.capture_manager.capture(window=win)
-
-        # Step 5: Diff & Verification Analysis
-        diff_res: VerificationResult = self.verifier.verify_selection(
-            pre_frame=pre_frame,
-            post_frame=post_frame,
-            roi=expected_roi,
-            min_diff_ratio=0.005
-        )
-
-        diff_ratio = diff_res.diff_ratio
-        visual_changed = diff_res.verified
-
-        if dry_run and executed and not exec_error:
-            # In dry-run mode, simulate affirmative visual response
-            diff_ratio = 0.025
-            visual_changed = True
+            post_frame = self.capture_manager.capture(window=win)
+            diff_res: VerificationResult = self.verifier.verify_selection(
+                pre_frame=pre_frame,
+                post_frame=post_frame,
+                roi=expected_roi,
+                min_diff_ratio=0.005
+            )
+            diff_ratio = diff_res.diff_ratio
+            visual_changed = diff_res.verified
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -313,6 +308,8 @@ class UIExplorer:
         outcome = "no_visual_change"
         if exec_error:
             outcome = "execution_error"
+        elif effective_dry_run:
+            outcome = "simulated"
         elif diff_ratio >= 0.08:
             outcome = "major_state_transition"
         elif diff_ratio >= 0.005:
@@ -327,40 +324,37 @@ class UIExplorer:
             except Exception:
                 pass
 
-        # Optional Revert on Failure (Safe Retreat)
-        reverted = False
-        if revert_on_fail and (not visual_changed or exec_error):
-            if not safety_manager.is_emergency_stopped:
-                try:
-                    self.input_controller.press_keys(keys=["escape"], duration_ms=50, dry_run=dry_run)
-                    reverted = True
-                except Exception:
-                    pass
-
         # Record probe attempt into persistent action history
         effective_gid = game_id or self.active_game_id or "generic"
-        if self.storage is not None:
+        if self.storage is not None and (not effective_dry_run or self.storage.db.simulation):
             try:
                 self.storage.record_action_history(
                     game_id=effective_gid,
                     action_name=f"probe_{act_norm}",
                     params=p,
                     success=(visual_changed and not exec_error),
+                    source="synthetic_fixture" if effective_dry_run else "live",
+                    reason=outcome,
                     duration_ms=latency_ms
                 )
             except Exception as e:
                 logger.debug("Failed to record probe action history: %s", e)
 
+        evidence_level = "simulated" if effective_dry_run else "observed"
         return {
             "action": action,
             "params": p,
-            "executed": executed,
+            "executed": executed and not effective_dry_run,
+            "dry_run": effective_dry_run,
+            "simulation_accepted": effective_dry_run and executed and not exec_error,
+            "evidence_level": evidence_level,
             "visual_change_detected": visual_changed,
             "verification_passed": visual_changed,
             "diff_ratio": round(diff_ratio, 4),
             "outcome": outcome,
             "execution_error": exec_error,
             "empirical_evidence": {
+                "evidence_level": evidence_level,
                 "diff_ratio": round(diff_ratio, 4),
                 "visual_changed": visual_changed,
                 "outcome": outcome,
@@ -368,7 +362,8 @@ class UIExplorer:
             },
             "new_text_detected": new_text_found,
             "latency_ms": round(latency_ms, 2),
-            "reverted": reverted,
+            "reverted": False,
+            "revert_status": "not_supported_without_verified_undo" if revert_on_fail else "not_requested",
             "probe_step": self.probe_count,
             "message": f"Probe {action}: outcome={outcome}, diff_ratio={round(diff_ratio, 4)}"
         }

@@ -8,6 +8,7 @@ and replans or stops safely on failure without blindly proceeding.
 from __future__ import annotations
 import time
 import logging
+from collections import deque
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 
@@ -34,6 +35,7 @@ class NavigationStepLog:
     verified: bool
     latency_ms: float
     error: Optional[str] = None
+    evidence_level: str = "observed"
 
 
 @dataclass
@@ -48,15 +50,24 @@ class NavigationResult:
     dry_run: bool
     message: str
     latency_ms: float
+    simulated_current_state: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result["evidence_level"] = (
+            "simulated" if self.dry_run else
+            "verified" if self.success and self.steps_executed > 0 else "observed"
+        )
+        return result
 
 
 class UINavigator:
     """
     Autonomous multi-step menu navigator.
     """
+
+    MAX_NAVIGATION_STEPS = 64
+    MAX_NAVIGATION_RETRIES = 8
 
     def __init__(
         self,
@@ -109,9 +120,27 @@ class UINavigator:
         # Step 1: Observe current initial state
         win = self.input_controller.window_manager.current_window
         init_frame = self.capture_manager.capture(window=win)
-        curr_det = self.recognizer.recognize_state(init_frame, game_id=game_id)
+        simulation_frames = bool(self.recognizer.storage and self.recognizer.storage.db.simulation)
+        curr_det = self.recognizer.recognize_state(
+            init_frame, game_id=game_id,
+            simulation=simulation_frames, record_observation=not effective_dry_run or simulation_frames,
+        )
         start_state = curr_det.state_name
         current_state = start_state
+
+        if curr_det.status != "known":
+            return NavigationResult(
+                success=False,
+                start_state=start_state,
+                current_state=current_state,
+                target_state=target_state,
+                steps_executed=0,
+                steps_total=0,
+                step_logs=[],
+                dry_run=effective_dry_run,
+                message=f"Navigation rejected: initial UI state is {curr_det.status}.",
+                latency_ms=(time.perf_counter() - t0) * 1000.0
+            )
 
         if current_state == target_state:
             return NavigationResult(
@@ -144,11 +173,21 @@ class UINavigator:
             )
 
         # Step 3: Traverse planned edges sequentially
-        steps_total = len(path_res.edges)
+        pending = deque(path_res.edges)
+        steps_total = len(pending)
         steps_executed = 0
-        retries_remaining = max_retries
+        retries_remaining = max(0, min(max_retries, self.MAX_NAVIGATION_RETRIES))
+        halt_reason = None
 
-        for idx, edge in enumerate(path_res.edges):
+        while pending:
+            if steps_executed + len(pending) > self.MAX_NAVIGATION_STEPS:
+                halt_reason = f"route exceeds the {self.MAX_NAVIGATION_STEPS}-step limit"
+                break
+            edge = pending.popleft()
+            if edge.source_node_id != current_state:
+                halt_reason = f"route source '{edge.source_node_id}' does not match observed state '{current_state}'"
+                break
+            idx = steps_executed
             # Check safety killswitch before every action
             safety_manager.check_safety()
 
@@ -173,24 +212,25 @@ class UINavigator:
                     params=edge.parameters,
                     verified=False,
                     latency_ms=(time.perf_counter() - step_t0) * 1000.0,
-                    error=f"Dispatch failed: {exec_err}"
+                    error=f"Dispatch failed: {exec_err}",
+                    evidence_level="simulated" if effective_dry_run else "observed",
                 )
                 step_logs.append(step_log)
-                self.graph.record_transition_result(
-                    from_state=current_state,
-                    to_state=expected_next,
-                    action_type=edge.trigger_action,
-                    params=edge.parameters,
-                    success=False,
-                    source="live" if not effective_dry_run else "synthetic_fixture",
-                    is_execution_error=True
-                )
+                if not effective_dry_run:
+                    self.graph.record_transition_result(
+                        from_state=current_state,
+                        to_state=expected_next,
+                        action_type=edge.trigger_action,
+                        params=edge.parameters,
+                        success=False,
+                        is_execution_error=True,
+                    )
                 return NavigationResult(
                     success=False,
                     start_state=start_state,
-                    current_state=current_state,
+                    current_state=start_state if effective_dry_run else current_state,
                     target_state=target_state,
-                    steps_executed=steps_executed,
+                    steps_executed=0 if effective_dry_run else steps_executed,
                     steps_total=steps_total,
                     step_logs=[asdict(s) for s in step_logs],
                     dry_run=effective_dry_run,
@@ -198,18 +238,17 @@ class UINavigator:
                     latency_ms=(time.perf_counter() - t0) * 1000.0
                 )
 
-            # Observe resulting state
-            time.sleep(0.08)
-            post_frame = self.capture_manager.capture(window=win)
-
             if effective_dry_run:
-                # In dry-run simulation mode, simulate transition
-                observed_state = expected_next
-                step_verified = True
+                # Advance only the hypothetical plan; no transition was observed.
+                observed_state = start_state
+                step_verified = False
             else:
+                time.sleep(0.08)
+                post_frame = self.capture_manager.capture(window=win)
                 post_det = self.recognizer.recognize_state(post_frame, game_id=game_id)
                 observed_state = post_det.state_name
-                step_verified = (observed_state == expected_next or (idx == steps_total - 1 and observed_state == target_state))
+                observation_status = post_det.status
+                step_verified = observation_status == "known" and observed_state == expected_next
 
             # Record step log and transition feedback
             step_log = NavigationStepLog(
@@ -221,10 +260,15 @@ class UINavigator:
                 params=edge.parameters,
                 verified=step_verified,
                 latency_ms=(time.perf_counter() - step_t0) * 1000.0,
-                error=None if step_verified else f"Expected state '{expected_next}', but observed '{observed_state}'"
+                error=None if step_verified or effective_dry_run else f"Expected state '{expected_next}', but observed '{observed_state}'",
+                evidence_level="simulated" if effective_dry_run else "verified" if step_verified else "observed",
             )
             step_logs.append(step_log)
             steps_executed += 1
+
+            if effective_dry_run:
+                current_state = expected_next
+                continue
 
             self.graph.record_transition_result(
                 from_state=current_state,
@@ -232,11 +276,23 @@ class UINavigator:
                 action_type=edge.trigger_action,
                 params=edge.parameters,
                 success=step_verified,
-                source="live" if not effective_dry_run else "synthetic_fixture",
-                is_execution_error=False
+                evidence={
+                    "evidence_level": "verified" if step_verified else "observed",
+                    "observed_state": observed_state,
+                },
+                is_execution_error=False,
             )
 
             if not step_verified:
+                if observation_status != "known":
+                    current_state = observed_state
+                    halt_reason = f"observed UI state is {observation_status}"
+                    break
+                if observed_state == target_state:
+                    # The goal is known, even though the intermediate edge landed elsewhere.
+                    current_state = observed_state
+                    steps_total = steps_executed
+                    break
                 if retries_remaining > 0:
                     logger.warning("Navigation step %d transition verification failed. Attempting replan...", idx + 1)
                     retries_remaining -= 1
@@ -245,8 +301,8 @@ class UINavigator:
                     if replan.found and replan.edges:
                         logger.info("Replanned alternate route with %d remaining steps.", len(replan.edges))
                         # Replace rest of queue with replanned route
-                        path_res.edges = replan.edges
-                        steps_total = steps_executed + len(replan.edges)
+                        pending = deque(replan.edges)
+                        steps_total = steps_executed + len(pending)
                         current_state = observed_state
                         continue
 
@@ -269,18 +325,25 @@ class UINavigator:
 
             current_state = observed_state
 
-        all_success = (current_state == target_state)
+        all_success = halt_reason is None and current_state == target_state
         return NavigationResult(
             success=all_success,
             start_state=start_state,
-            current_state=current_state,
+            current_state=start_state if effective_dry_run else current_state,
             target_state=target_state,
-            steps_executed=steps_executed,
+            steps_executed=0 if effective_dry_run else steps_executed,
             steps_total=steps_total,
             step_logs=[asdict(s) for s in step_logs],
             dry_run=effective_dry_run,
-            message=f"Navigation {'succeeded' if all_success else 'halted'} (current: {current_state}).",
-            latency_ms=(time.perf_counter() - t0) * 1000.0
+            message=(
+                f"Navigation halted: {halt_reason}. No further inputs dispatched."
+                if halt_reason else
+                f"Dry-run accepted the route to '{current_state}'; no transition executed."
+                if effective_dry_run and all_success else
+                f"Navigation {'succeeded' if all_success else 'halted'} (current: {current_state})."
+            ),
+            latency_ms=(time.perf_counter() - t0) * 1000.0,
+            simulated_current_state=current_state if effective_dry_run else None,
         )
 
     def _dispatch_navigation_action(
@@ -308,19 +371,22 @@ class UINavigator:
                 clicks=clicks,
                 dry_run=dry_run
             )
-            return res.executed or res.dry_run, res.reason if not (res.executed or res.dry_run) else None
+            ok = res.executed or (res.dry_run and res.status == "success")
+            return ok, None if ok else res.reason
 
         elif action == "click_target":
             nx = params.get("x", 0.5)
             ny = params.get("y", 0.5)
             btn = params.get("button", "left")
             res = self.input_controller.click(norm_x=nx, norm_y=ny, button=btn, dry_run=dry_run)
-            return res.executed or res.dry_run, res.reason if not (res.executed or res.dry_run) else None
+            ok = res.executed or (res.dry_run and res.status == "success")
+            return ok, None if ok else res.reason
 
         elif action == "wait":
             dur_ms = params.get("duration_ms", 500)
             safety_manager.check_safety()
-            time.sleep(dur_ms / 1000.0)
+            if not dry_run:
+                time.sleep(dur_ms / 1000.0)
             return True, None
 
         else:

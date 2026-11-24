@@ -129,6 +129,15 @@ class InputController:
 
             if cursor_x is not None and cursor_y is not None:
                 if 0 <= cursor_x <= 5 and 0 <= cursor_y <= 5:
+                    if sys.platform == "win32" and not getattr(getattr(pydirectinput, "position", None), "assert_called", None):
+                        try:
+                            import ctypes
+                            from ctypes import wintypes
+                            pt = wintypes.POINT(-1, -1)
+                            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)) == 0:
+                                return
+                        except Exception:
+                            pass
                     safety_manager.trigger_emergency_stop(
                         "Hardware corner abort triggered: mouse cursor within 5px of (0,0)."
                     )
@@ -245,12 +254,12 @@ class InputController:
 
         # Ensure window is focused if auto_focus is enabled
         effective_dry_run = self.is_dry_run_active(dry_run)
-        if self.auto_focus and not win.is_focused:
+        if self.auto_focus and not win.is_focused and not effective_dry_run:
             focused = self.window_manager.focus_window(win.hwnd)
             if focused:
                 # Refresh window info
                 win = self.window_manager.current_window or win
-            elif not effective_dry_run:
+            else:
                 logger.warning("Could not focus target game window '%s'", win.title)
 
         # Map normalized [0, 1] to window client area
@@ -332,6 +341,7 @@ class InputController:
                 executed=False,
                 verification_passed=None,
                 reason=f"Safety check rejected click: {e}",
+                status="failed",
                 latency_ms=(time.perf_counter() - t0) * 1000.0
             )
 
