@@ -36,6 +36,12 @@ Back up an existing live SQLite database before first launching schema v5. Use a
 
 Promotion is explicit and guarded by fresh, paired benchmark observations against the unchanged active definition, successful postcondition comparisons, and a measured speed improvement. A candidate starts with no trial credit. The gate requires at least three matched pairs, both execution orders with at most one pair of imbalance, no comparable candidate failures, and at least 10% median paired improvement in each order. Client-provided numbers, manual lifecycle labels, old action history, fixture trials and dry-run outcomes do not meet that gate. There is no MCP producer of trusted live trial receipts yet. A future runner must establish equivalent starting states safely, bind actions to the matching offline game, and record actual postcondition evidence. Do not execute or promote a candidate using a live game simply to make a test pass. Unpromoted candidates and their trials are discarded when their game's checkpoint is restored, so restoring an older active definition cannot reuse stale comparison evidence.
 
+### Headless A/B rehearsal
+
+Run `python scripts/demo_skill_benchmark_sim.py` from a checkout. Pass `--first candidate` to run the opposite order. Each arm gets a separately supplied toy starting state and a single-use in-process rearm token. The demo uses fake-clock action costs, not hardware latency. It can exercise ordering, start-state equality and the postcondition, but its receipt is a different type from live evidence and is never eligible for promotion. It opens no native game window, sends no input, and writes no knowledge database.
+
+A native benchmark runner is still missing. When that becomes possible, a local operator must establish the same offline starting state separately for each arm; a SQLite checkpoint is not a game reset. Never let an MCP caller mark itself ready or submit elapsed times as proof.
+
 ## Checkpoint and route policy
 
 Versioned checkpoints preserve exact per-game rows for UI states, transitions, learned skills and selectors, including provenance, timestamps, counters and rejection status. Rollback is atomic and cannot replace another game's rows. Global concepts, action history and route quarantine do not rewind. Old unversioned snapshots remain listed but cannot safely be restored because they omitted fields and rejected transitions; create a new checkpoint before testing rollback.
