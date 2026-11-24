@@ -27,6 +27,22 @@ if sys.platform == "win32":
             logger.debug("DPI awareness initialization note: %s", e)
 
 
+def game_id_for_window(window: WindowInfo) -> str:
+    """Keep attached-window identity and live evidence in the same game namespace."""
+    raw_name = window.process_name or window.title or "unknown_game"
+    clean_name = raw_name.lower().replace(".exe", "")
+    return "".join(c if c.isalnum() or c == "_" else "_" for c in clean_name).strip("_") or "unknown_game"
+
+
+def window_binding(window: WindowInfo) -> tuple:
+    """Return the identity and geometry used to scope capture and dispatch."""
+    return (
+        window.hwnd, window.pid, window.process_name.casefold(),
+        window.client_x, window.client_y, window.client_width, window.client_height,
+        window.dpi_scale,
+    )
+
+
 class WindowManager:
     """Manages game window discovery, rect mapping, and focus control."""
 
@@ -49,14 +65,31 @@ class WindowManager:
     def current_window(self) -> Optional[WindowInfo]:
         if self._mock_window is not None:
             return self._mock_window
-        if self._current_window is not None and sys.platform == "win32":
-            try:
-                import win32gui
-                if win32gui.IsWindow(self._current_window.hwnd):
-                    self._current_window = self.get_window_info(self._current_window.hwnd)
-            except Exception:
-                pass
-        return self._current_window
+        previous = self._current_window
+        if previous is None or sys.platform != "win32":
+            return previous
+
+        fresh = None
+        try:
+            import win32gui
+
+            if win32gui.IsWindow(previous.hwnd) and win32gui.IsWindowVisible(previous.hwnd):
+                candidate = self.get_window_info(previous.hwnd)
+                if (
+                    candidate.hwnd == previous.hwnd
+                    and candidate.pid == previous.pid
+                    and candidate.process_name.casefold() == previous.process_name.casefold()
+                    and candidate.pid > 0
+                    and candidate.process_name.casefold() not in {"", "unknown"}
+                ):
+                    fresh = candidate
+        except Exception as exc:
+            logger.debug("Could not refresh attached window: %s", exc)
+        if self._current_window is not previous:
+            # A concurrent attach changed the selection during refresh.
+            return None
+        self._current_window = fresh
+        return fresh
 
     def refresh_current_window(self) -> Optional[WindowInfo]:
         """Explicitly re-queries the window geometry and state from the OS."""

@@ -11,13 +11,14 @@ import json
 import base64
 import time
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Annotated
 from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 import cv2
 import numpy as np
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
 from . import __version__
 from .core.types import (
@@ -34,7 +35,7 @@ from .core.types import (
     VisionAgentEscalation,
 )
 from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
-from .core.window import WindowManager
+from .core.window import WindowManager, game_id_for_window
 from .core.capture import CaptureManager, FixtureBackend
 from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
@@ -55,7 +56,7 @@ from .skills.engine import SkillExecutionEngine, SkillExecutionResult
 from .skills.learner import SkillLearner
 from .skills.contracts import NavigationNode, NavigationEdge
 from .assets.indexer import GameAssetIndexer
-from .core.explorer import UIExplorer, UIElementCandidate
+from .core.explorer import UIExplorer, UIElementCandidate, PROBE_TIMEOUT_MIN_S, PROBE_TIMEOUT_MAX_S
 
 # Ensure UTF-8 output on Windows
 if sys.platform == "win32":
@@ -89,7 +90,9 @@ class UGMContext:
     ):
         self.window_manager = WindowManager()
         self.capture_manager = CaptureManager(
-            backend_override=FixtureBackend() if offline_fixture is not None else None
+            backend_override=FixtureBackend() if offline_fixture is not None else None,
+            allow_fixture_fallback=False,
+            require_window=True,
         )
         backend_key = ocr_backend.strip().lower()
         ocr_options = {}
@@ -218,10 +221,7 @@ class UGMContext:
                 "window": None
             }
 
-        # Derive sanitized game_id from process_name or title
-        raw_name = win.process_name or win.title or "unknown_game"
-        clean_name = raw_name.lower().replace(".exe", "")
-        game_id = "".join(c if c.isalnum() or c == "_" else "_" for c in clean_name).strip("_") or "unknown_game"
+        game_id = game_id_for_window(win)
 
         self.active_game_id = game_id
         self.window_manager.attach_window(win)
@@ -1129,22 +1129,28 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         expected_roi: Optional[List[float]] = None,
         dry_run: bool = False,
         revert_on_fail: bool = False,
-        game_id: Optional[str] = None
+        game_id: Optional[str] = None,
+        timeout_s: Annotated[float, Field(ge=PROBE_TIMEOUT_MIN_S, le=PROBE_TIMEOUT_MAX_S)] = 5.0,
     ) -> Dict[str, Any]:
         """
         Executes a bounded Observe-Act-Verify probe step.
-        Live probes report observed visual/textual change, not proof of a gameplay rule.
+        Live probes sample for stable change within timeout_s, not proof of a gameplay rule.
+        The timeout is cooperative: native capture/input/OCR already in progress may overrun.
+        Click and hover require explicit normalized x and y coordinates.
         Dry-run validates the requested action without dispatch or empirical verification.
         revert_on_fail is retained for compatibility; no generic undo is dispatched.
         """
-        norm_roi = NormalizedRect(expected_roi[0], expected_roi[1], expected_roi[2], expected_roi[3]) if expected_roi and len(expected_roi) == 4 else None
+        if expected_roi is not None and len(expected_roi) != 4:
+            raise ValueError("expected_roi must contain [x, y, width, height].")
+        norm_roi = NormalizedRect(*expected_roi) if expected_roi is not None else None
         return ctx.explorer.probe_step(
             action=action,
             params=params,
             expected_roi=norm_roi,
+            timeout_s=timeout_s,
             dry_run=dry_run,
             revert_on_fail=revert_on_fail,
-            game_id=game_id or ctx.active_game_id
+            game_id=game_id
         )
 
     # 25. manage_knowledge_state

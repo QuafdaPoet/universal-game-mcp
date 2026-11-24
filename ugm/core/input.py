@@ -12,7 +12,7 @@ from typing import Optional, List, Tuple, Any, Set
 
 from .types import WindowInfo, ClickResult, ActionResult, ClickButton
 from .safety import safety_manager, SafetyViolationError, EmergencyStopTriggered
-from .window import WindowManager
+from .window import WindowManager, window_binding
 
 logger = logging.getLogger("ugm.input")
 
@@ -227,11 +227,25 @@ class InputController:
 
         return actions
 
+    def _require_bound_input(self, expected: WindowInfo) -> WindowInfo:
+        """Do not refocus or switch windows for an already observed probe."""
+        safety_manager.check_safety()
+        current = self.window_manager.current_window
+        if current is None or not current.is_focused or current.is_minimized:
+            raise SafetyViolationError("Probe input target is no longer focused.")
+        if window_binding(current) != window_binding(expected):
+            raise SafetyViolationError("Probe input target changed during dispatch.")
+        if pydirectinput is None:
+            raise SafetyViolationError("Native input backend is unavailable.")
+        return current
+
     def _resolve_screen_coords(
         self,
         norm_x: float,
         norm_y: float,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        *,
+        target_window: Optional[WindowInfo] = None,
     ) -> Tuple[int, int, WindowInfo]:
         """
         Validates normalized coordinates and converts them to absolute screen pixels
@@ -241,7 +255,7 @@ class InputController:
         safety_manager.check_safety()
         safety_manager.validate_normalized_coordinates(norm_x, norm_y)
 
-        win = self.window_manager.current_window
+        win = self._require_bound_input(target_window) if target_window is not None else self.window_manager.current_window
         if win is None:
             raise SafetyViolationError("No target game window selected. Cannot perform input.")
 
@@ -254,7 +268,7 @@ class InputController:
 
         # Ensure window is focused if auto_focus is enabled
         effective_dry_run = self.is_dry_run_active(dry_run)
-        if self.auto_focus and not win.is_focused and not effective_dry_run:
+        if target_window is None and self.auto_focus and not win.is_focused and not effective_dry_run:
             focused = self.window_manager.focus_window(win.hwnd)
             if focused:
                 # Refresh window info
@@ -265,6 +279,10 @@ class InputController:
         # Map normalized [0, 1] to window client area
         screen_x = int(win.client_x + norm_x * win.client_width)
         screen_y = int(win.client_y + norm_y * win.client_height)
+
+        if target_window is not None:
+            screen_x = min(screen_x, win.client_x + win.client_width - 1)
+            screen_y = min(screen_y, win.client_y + win.client_height - 1)
 
         # Strict containment verification
         min_x = win.client_x
@@ -285,14 +303,16 @@ class InputController:
         norm_x: float,
         norm_y: float,
         duration_ms: int = 500,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        *,
+        target_window: Optional[WindowInfo] = None,
     ) -> Tuple[int, int, bool]:
         """
         Moves the mouse cursor to the target normalized coordinate and hovers for duration_ms.
         Returns (screen_x, screen_y, executed).
         """
         is_dry_run = self.is_dry_run_active(dry_run)
-        screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run)
+        screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run, target_window=target_window)
 
         if is_dry_run:
             logger.info(
@@ -304,6 +324,8 @@ class InputController:
 
         try:
             self.check_corner_abort()
+            if target_window is not None:
+                self._require_bound_input(target_window)
             if pydirectinput is not None:
                 pydirectinput.moveTo(screen_x, screen_y)
             time.sleep(max(0.01, duration_ms / 1000.0))
@@ -319,7 +341,9 @@ class InputController:
         norm_y: float,
         button: str = "left",
         clicks: int = 1,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        *,
+        target_window: Optional[WindowInfo] = None,
     ) -> ClickResult:
         """
         Executes a safe DirectInput click at normalized coordinates within the game window.
@@ -328,7 +352,7 @@ class InputController:
         is_dry_run = self.is_dry_run_active(dry_run)
 
         try:
-            screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run)
+            screen_x, screen_y, win = self._resolve_screen_coords(norm_x, norm_y, dry_run=is_dry_run, target_window=target_window)
         except Exception as e:
             return ClickResult(
                 x_normalized=norm_x,
@@ -366,12 +390,16 @@ class InputController:
 
         try:
             self.check_corner_abort()
+            if target_window is not None:
+                self._require_bound_input(target_window)
             if pydirectinput is not None:
                 pydirectinput.moveTo(screen_x, screen_y)
             time.sleep(0.05)
 
             for _ in range(clicks):
                 self.check_corner_abort()
+                if target_window is not None:
+                    self._require_bound_input(target_window)
                 if pydirectinput is not None:
                     if button == "right":
                         pydirectinput.rightClick(screen_x, screen_y)
@@ -403,7 +431,9 @@ class InputController:
         self,
         keys: List[str],
         duration_ms: int = 100,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        *,
+        target_window: Optional[WindowInfo] = None,
     ) -> ActionResult:
         """
         Sends sequential or combo keystrokes to the target game window.
@@ -414,7 +444,7 @@ class InputController:
         action_groups = self.normalize_and_validate_keys(keys)
 
         # 2. Verify target window existence
-        win = self.window_manager.current_window
+        win = self._require_bound_input(target_window) if target_window is not None else self.window_manager.current_window
         if win is None:
             raise SafetyViolationError("No target game window selected. Cannot press keys.")
 
@@ -441,7 +471,7 @@ class InputController:
             )
 
         # Live path: verify window focus
-        if self.auto_focus and not win.is_focused:
+        if target_window is None and self.auto_focus and not win.is_focused:
             self.window_manager.focus_window(win.hwnd)
             win = self.window_manager.current_window or win
 
@@ -466,6 +496,8 @@ class InputController:
                 for mod in modifiers:
                     self.check_corner_abort()
                     safety_manager.check_safety()
+                    if target_window is not None:
+                        self._require_bound_input(target_window)
                     if pydirectinput is not None:
                         pydirectinput.keyDown(mod)
                     held_keys.append(mod)
@@ -474,6 +506,8 @@ class InputController:
                 # Press primary key
                 self.check_corner_abort()
                 safety_manager.check_safety()
+                if target_window is not None:
+                    self._require_bound_input(target_window)
                 if pydirectinput is not None:
                     pydirectinput.keyDown(primary)
                 held_keys.append(primary)
