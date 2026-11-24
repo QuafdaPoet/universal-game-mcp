@@ -298,7 +298,10 @@ class SkillExecutionEngine:
                         reason=step_res.message, duration_ms=latency,
                     )
                 if self.storage and not effective_dry_run and not skill_data.get("is_curated"):
-                    self.storage.update_skill_stats(skill_id, success=False, is_execution_error=True, reason=step_res.message, game_id=resolved_game_id)
+                    self.storage.update_skill_stats(
+                        skill_id, success=False, is_execution_error=True, reason=step_res.message,
+                        game_id=resolved_game_id, expected_version=skill_data.get("version"),
+                    )
                 return SkillExecutionResult(
                     skill_id=skill_id,
                     game_id=resolved_game_id,
@@ -340,7 +343,10 @@ class SkillExecutionEngine:
         # Only an actual postcondition check can validate or invalidate a
         # learned gameplay rule. Mere successful dispatch is not evidence.
         if self.storage and not effective_dry_run and post_verification and not skill_data.get("is_curated"):
-            self.storage.update_skill_stats(skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg, game_id=resolved_game_id)
+            self.storage.update_skill_stats(
+                skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg,
+                game_id=resolved_game_id, expected_version=skill_data.get("version"),
+            )
 
         return SkillExecutionResult(
             skill_id=skill_id,

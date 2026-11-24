@@ -19,7 +19,7 @@ from .transition_quarantine import quarantine_transition, transition_identity
 
 logger = logging.getLogger("ugm.memory.database")
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 _SIMULATION_APPLICATION_ID = 0x55474D53  # 'UGMS'
 SIMULATION_DB_SUFFIX = ".simulation"
 
@@ -399,5 +399,47 @@ class DatabaseManager:
                 )
                 quarantine_transition(conn, row["game_id"], key, row["updated_at"], "migrated_rejected_transition")
             conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (4, ?)", (time.time(),))
+
+        if from_ver < 5 <= to_ver:
+            self._execute_migration_script(conn, """
+                CREATE TABLE skill_optimization_candidates (
+                    candidate_id TEXT PRIMARY KEY NOT NULL,
+                    game_id TEXT NOT NULL,
+                    skill_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    base_version TEXT NOT NULL,
+                    baseline_fingerprint TEXT NOT NULL,
+                    candidate_fingerprint TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    preconditions TEXT NOT NULL,
+                    steps TEXT NOT NULL,
+                    post_verification TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    promoted_at REAL,
+                    archived_baseline TEXT,
+                    UNIQUE (game_id, skill_id, version)
+                );
+
+                CREATE TABLE skill_optimization_trials (
+                    id INTEGER PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES skill_optimization_candidates(candidate_id) ON DELETE CASCADE,
+                    baseline_first INTEGER NOT NULL CHECK (baseline_first IN (0, 1)),
+                    candidate_passed INTEGER NOT NULL CHECK (candidate_passed IN (0, 1)),
+                    baseline_latency_ms REAL NOT NULL CHECK (baseline_latency_ms > 0),
+                    candidate_latency_ms REAL NOT NULL CHECK (candidate_latency_ms > 0),
+                    finished_at REAL NOT NULL,
+                    evidence TEXT NOT NULL
+                );
+                CREATE INDEX idx_skill_optimization_trials_candidate
+                ON skill_optimization_trials (candidate_id, finished_at);
+
+                CREATE TABLE skill_optimization_capture_ids (
+                    capture_id TEXT PRIMARY KEY NOT NULL,
+                    trial_id INTEGER NOT NULL REFERENCES skill_optimization_trials(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_skill_optimization_captures_trial ON skill_optimization_capture_ids (trial_id);
+            """)
+            conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (5, ?)", (time.time(),))
 
         logger.info("Database schema migration to v%d complete.", to_ver)

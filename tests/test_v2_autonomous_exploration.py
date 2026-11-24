@@ -234,7 +234,7 @@ async def test_ac4_dynamic_skill_learning_and_cross_session_persistence(v2_test_
     resumed_skill = found_skills["open_tech_tree"]
     assert resumed_skill["name"] == "Open Technology Tree"
     assert resumed_skill["status"] == "candidate"
-    assert resumed_skill["success_count"] == 1
+    assert resumed_skill["success_count"] == 0
 
 
 # ============================================================================
@@ -269,7 +269,7 @@ def test_ac5_isolated_execution_failure_preserves_verified_status(v2_test_env):
 
     skill_before = storage.get_learned_skills(game_id=game_id)[0]
     assert skill_before["status"] == "verified"
-    assert skill_before["success_count"] == 6
+    assert skill_before["success_count"] == 5
     assert skill_before["consecutive_failures"] == 0
 
     # Simulate TRANSIENT EXECUTION FAILURE (e.g. window minimized / timeout)
@@ -382,7 +382,7 @@ async def test_ac8_gradual_skill_optimization(v2_test_env):
     """
     AC-8: AI optimizes an existing learned GameSkill by refining its step sequence
     (e.g. shortening delays, removing redundant clicks), recording rationale,
-    and bumping its version while preserving historical execution track records.
+    and staging it separately without changing the active skill or lending it prior evidence.
     """
     server = v2_test_env["server"]
     storage = v2_test_env["storage"]
@@ -419,12 +419,18 @@ async def test_ac8_gradual_skill_optimization(v2_test_env):
     opt_data = extract_data(opt_res)
     assert opt_data["success"] is True
 
-    # Verify updated skill in storage
+    # The original version and its track record remain active.
     skill = storage.get_learned_skills(game_id=game_id)[0]
-    assert skill["version"] == "1.1.0", "Optimization must bump minor version"
-    assert len(skill["steps"]) == 2, "Steps must reflect streamlined sequence"
-    assert skill["success_count"] == 4, "Execution track record must be preserved"
-    assert "redundant" in skill["optimization_notes"].lower()
+    assert skill["version"] == "1.0.0"
+    assert len(skill["steps"]) == 3
+    assert skill["success_count"] == 3
+
+    candidate = opt_data["candidate"]
+    assert not opt_data["promoted"]
+    assert candidate["version"] == "1.1.0"
+    assert candidate["steps"] == optimized_steps
+    assert candidate["trial_count"] == 0
+    assert "redundant" in candidate["rationale"].lower()
 
 
 # ============================================================================

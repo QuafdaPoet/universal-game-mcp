@@ -1000,13 +1000,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 post_verification=post_verification,
                 source=source
             )
-            if initial_confidence is not None:
-                ctx.storage.update_knowledge_state(
-                    game_id=target_game_id,
-                    item_type="skill",
-                    item_id=skill_id,
-                    new_status="candidate"
-                )
+            # initial_confidence is accepted for legacy clients; a caller hint
+            # cannot rewrite a stored skill's lifecycle or serve as validation.
             res["success"] = True
             return res
         except Exception as e:
@@ -1300,31 +1295,50 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     @server.tool()
     def optimize_skill(
         skill_id: str,
-        steps: List[Dict[str, Any]],
+        steps: Optional[List[Dict[str, Any]]] = None,
         rationale: str = "",
-        game_id: Optional[str] = None
+        game_id: Optional[str] = None,
+        operation: str = "propose",
+        candidate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Optimizes a learned Game Skill by refining its step sequence, logging rationale,
-        and bumping its version number while preserving execution track records.
-        Pass game_id if the skill_id is shared by multiple games.
+        Propose a separate skill revision. This never replaces the active skill.
+        Use inspect or promote with an explicit game_id and candidate_id. Promotion
+        requires internal paired live benchmarks; callers cannot submit trial claims.
         """
         try:
-            success = ctx.skill_learner.optimize_skill(
-                skill_id=skill_id, new_steps=steps, rationale=rationale, game_id=game_id
-            )
-            not_found = "not found" if game_id is not None else "not found or ambiguous; pass game_id if shared"
-            return {
-                "success": success,
-                "skill_id": skill_id,
-                "message": f"Skill '{skill_id}' {'optimized successfully' if success else not_found}."
-            }
+            if operation == "propose":
+                if candidate_id is not None:
+                    raise ValueError("A new proposal cannot specify an existing candidate_id.")
+                candidate = ctx.skill_learner.stage_optimization(
+                    skill_id=skill_id, new_steps=steps or [], rationale=rationale, game_id=game_id,
+                )
+                if candidate is None:
+                    return {"success": False, "promoted": False, "skill_id": skill_id,
+                            "message": f"No candidate for '{skill_id}': missing, ambiguous, rejected, or identical steps."}
+                return {"success": True, "promoted": False, "skill_id": skill_id,
+                        "candidate": asdict(candidate),
+                        "message": "Candidate staged; the active skill is unchanged."}
+
+            if operation not in {"inspect", "promote"}:
+                raise ValueError("operation must be propose, inspect, or promote.")
+            if not game_id or not candidate_id or steps is not None:
+                raise ValueError("Inspect/promote needs an explicit game_id and candidate_id, without steps.")
+
+            if operation == "inspect":
+                candidate = ctx.storage.get_skill_optimization_candidate(game_id, skill_id, candidate_id)
+                return {
+                    "success": candidate is not None,
+                    "skill_id": skill_id,
+                    "candidate": asdict(candidate) if candidate else None,
+                    "message": "Candidate loaded." if candidate else "Candidate not found.",
+                }
+
+            decision = ctx.storage.promote_skill_optimization(game_id, skill_id, candidate_id)
+            return {**decision, "skill_id": skill_id}
         except (SafetyViolationError, ValueError) as e:
-            return {
-                "success": False,
-                "skill_id": skill_id,
-                "message": f"Optimization rejected: {e}"
-            }
+            return {"success": False, "promoted": False, "skill_id": skill_id,
+                    "message": f"Optimization rejected: {e}"}
 
     # 31. prune_temporary_data
     @server.tool()

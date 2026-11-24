@@ -79,7 +79,7 @@ class SkillLearner:
             raise ValueError("Simulated skills cannot be learned into the live knowledge database.")
 
         # Save to persistent knowledge store as candidate
-        self.storage.save_learned_skill(
+        saved = self.storage.save_learned_skill(
             skill_id=skill_id,
             game_id=game_id,
             name=name,
@@ -91,13 +91,17 @@ class SkillLearner:
             source=source
         )
 
-        logger.info("Saved candidate skill '%s' for game '%s' (status: candidate).", skill_id, game_id)
+        if not saved:
+            raise ValueError("Existing verified skill is unchanged; use optimize_skill to stage a revision.")
+        recorded = self.storage.get_learned_skill(skill_id, game_id=game_id)
+        status = recorded.status if recorded else "candidate"
+        logger.info("Saved or retained skill '%s' for game '%s' (status: %s).", skill_id, game_id, status)
         return {
             "skill_id": skill_id,
             "game_id": game_id,
-            "status": "candidate",
-            "message": f"Candidate skill '{skill_id}' recorded successfully. Requires {self.min_validations} verified executions to promote to reusable status.",
-            "steps_count": len(steps)
+            "status": status,
+            "message": f"Skill '{skill_id}' recorded or retained as {status}.",
+            "steps_count": len(steps),
         }
 
     def validate_skill(
@@ -171,7 +175,7 @@ class SkillLearner:
             reason=reason
         )
 
-    def optimize_skill(
+    def stage_optimization(
         self,
         skill_id: str,
         new_steps: List[Dict[str, Any]],
@@ -179,8 +183,9 @@ class SkillLearner:
         new_version: Optional[str] = None,
         *,
         game_id: Optional[str] = None,
-    ) -> bool:
-        """Optimizes a skill with a refined sequence of steps and version bump."""
+    ):
+        """Stages a changed program without replacing the current skill.
+        """
         if not new_steps or not isinstance(new_steps, list):
             raise ValueError(f"Cannot optimize skill '{skill_id}': step sequence cannot be empty.")
 
@@ -194,20 +199,36 @@ class SkillLearner:
 
         # Validate action primitives
         for idx, step in enumerate(new_steps):
+            if not isinstance(step, dict):
+                raise ValueError(f"Optimized step {idx + 1} must be an object.")
             act = step.get("action")
             if act not in ALLOWLISTED_ACTION_PRIMITIVES:
                 raise SafetyViolationError(
                     f"Optimized step {idx + 1} has disallowed action primitive '{act}'."
                 )
         if learned is None:
-            return False
-        return self.storage.optimize_learned_skill(
+            return None
+        return self.storage.stage_skill_optimization(
             skill_id=skill_id,
             game_id=learned.game_id,
             new_steps=new_steps,
             rationale=rationale,
             new_version=new_version
         )
+
+    def optimize_skill(
+        self,
+        skill_id: str,
+        new_steps: List[Dict[str, Any]],
+        rationale: str = "",
+        new_version: Optional[str] = None,
+        *,
+        game_id: Optional[str] = None,
+    ) -> bool:
+        """Compatibility wrapper: success means staged, not promoted."""
+        return self.stage_optimization(
+            skill_id, new_steps, rationale, new_version, game_id=game_id,
+        ) is not None
 
     def delete_skill(self, skill_id: str, *, game_id: Optional[str] = None) -> bool:
         """Deletes a learned skill entry."""

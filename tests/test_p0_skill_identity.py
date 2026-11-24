@@ -149,7 +149,7 @@ def test_concurrent_validations_do_not_drop_updates(storage):
             future.result()
 
     skill = storage.get_learned_skill("pause", game_id="game_a")
-    assert (skill.validation_count, skill.success_count) == (81, 81)
+    assert (skill.validation_count, skill.success_count) == (80, 80)
 
 
 def _structured_payload(result):
@@ -186,7 +186,8 @@ async def test_mcp_delete_and_optimize_respect_game_scope(tmp_path):
         a = ctx.storage.get_learned_skill("shared_pause", game_id="game_a")
         b = ctx.storage.get_learned_skill("shared_pause", game_id="game_b")
         assert a.steps == STEPS
-        assert b.steps == NEW_STEPS
+        assert b.steps == STEPS
+        assert _structured_payload(optimized)["candidate"]["steps"] == NEW_STEPS
 
         deleted = await server.call_tool("delete_learned_memory", {
             "skill_id": "shared_pause", "game_id": "game_a",
