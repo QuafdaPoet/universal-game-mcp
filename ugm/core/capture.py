@@ -374,9 +374,11 @@ class CaptureManager:
     def require_attached_window(self, window_manager: WindowManager, expected_window: Optional[WindowInfo]) -> WindowInfo:
         """Confirm the expected focused client is still the attached native target."""
         safety_manager.check_safety()
+        if expected_window is None:
+            raise SafetyViolationError("No target game window attached. Attach a game before requesting capture.")
         current = window_manager.current_window
         if (
-            not expected_window or not current or not current.hwnd or current.pid <= 0
+            not current or not current.hwnd or current.pid <= 0
             or not current.process_name or current.process_name.casefold() == "unknown"
             or not current.is_focused or current.is_minimized
             or current.client_width <= 0 or current.client_height <= 0
@@ -391,7 +393,7 @@ class CaptureManager:
         window = replace(self.require_attached_window(window_manager, expected_window))
         frame = self._capture_frame(window, None, require_live=True)
         self.require_attached_window(window_manager, window)
-        if frame is None or frame.ndim != 3 or frame.shape != (window.client_height, window.client_width, 3):
+        if not isinstance(frame, np.ndarray) or frame.shape != (window.client_height, window.client_width, 3):
             raise SafetyViolationError("Live observation frame does not match the attached target client.")
         self._last_frame = frame
         self._last_capture_time = time.perf_counter() - t0

@@ -89,6 +89,7 @@ class UGMContext:
         enforce_dry_run: bool = False
     ):
         self.window_manager = WindowManager()
+        self._offline_fixture_configured = False
         self.capture_manager = CaptureManager(
             backend_override=FixtureBackend() if offline_fixture is not None else None,
             allow_fixture_fallback=False,
@@ -359,7 +360,6 @@ class UGMContext:
             self.explorer.storage = simulation_storage
             self.navigation_graphs.clear()
             self.navigators.clear()
-            self.pre_capture_cache.clear()
             self.simulation_session = True
             self._init_default_game_metadata()
         mock_win = WindowInfo(
@@ -382,8 +382,20 @@ class UGMContext:
         self.window_manager.set_mock_window(mock_win)
         fixture_backend = FixtureBackend(img)
         self.capture_manager.set_backend(fixture_backend)
+        self.pre_capture_cache.clear()
         self.input_controller.enforce_dry_run = True
+        self._offline_fixture_configured = True
         logger.info("UGM configured in offline fixture mode using %s (%dx%d)", fixture_path, w, h)
+
+    def capture_observation(self) -> np.ndarray:
+        """Acquire a game-client frame for ordinary MCP capture and OCR."""
+        window = self.window_manager.current_window
+        if self._offline_fixture_configured:
+            if not isinstance(self.capture_manager.backend, FixtureBackend):
+                raise SafetyViolationError("Offline observation requires the configured fixture capture backend.")
+            return self.capture_manager.capture(window=window)
+        # --dry-run limits hardware input, not the scope of real observation.
+        return self.capture_manager.capture_attached_window(self.window_manager, window)
 
 
 def create_server(context: Optional[UGMContext] = None) -> MCPServer:
@@ -424,11 +436,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         save_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Captures the current screen of the active game window.
+        Captures the attached, focused game client or explicitly configured fixture.
         Optional 'roi' parameter specifies [x, y, width, height] normalized coordinates (0.0 to 1.0).
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        full_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        full_frame = ctx.capture_observation()
         frame = full_frame
         if norm_roi is not None:
             box = norm_roi.to_pixel(full_frame.shape[1], full_frame.shape[0])
@@ -464,11 +476,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         event_tag: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Performs event-driven OCR on the game screen or ROI using RapidOCR (PP-OCRv4/v6 CPU).
+        Performs OCR on the attached, focused game client or explicitly configured fixture.
         Returns bounding boxes normalized relative to the game window and detected text items.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        frame = ctx.capture_observation()
         ocr_res = ctx.ocr_engine.read_text(frame, roi=norm_roi, event_tag=event_tag)
         return ocr_res.to_dict()
 
