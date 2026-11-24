@@ -453,7 +453,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     post_verification, status, validation_count, success_count, fail_count,
                     confidence, source, created_at, updated_at
                 ) VALUES (?, ?, '1.0.0', ?, ?, ?, ?, ?, ?, 1, 1, 0, ?, ?, ?, ?)
-                ON CONFLICT(skill_id) DO UPDATE SET
+                ON CONFLICT(game_id, skill_id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
                     preconditions = excluded.preconditions,
@@ -477,6 +477,20 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 json.dumps(post_verification or {}), status, init_conf, source, now, now
             ))
 
+    @staticmethod
+    def _find_skill_row(conn, skill_id: str, game_id: Optional[str]):
+        if game_id is not None:
+            return conn.execute(
+                "SELECT * FROM learned_skills WHERE game_id = ? AND skill_id = ?",
+                (game_id, skill_id),
+            ).fetchone()
+
+        # Legacy callers may omit the game only if the identifier is unique.
+        matches = conn.execute(
+            "SELECT * FROM learned_skills WHERE skill_id = ? LIMIT 2", (skill_id,)
+        ).fetchall()
+        return matches[0] if len(matches) == 1 else None
+
     def update_skill_stats(
         self,
         skill_id: str,
@@ -484,7 +498,9 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         auto_promote_threshold: int = 3,
         is_execution_error: bool = False,
         reason: str = "",
-        latency_ms: Optional[float] = None
+        latency_ms: Optional[float] = None,
+        *,
+        game_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Updates validation stats and manages 4-state lifecycle (candidate, verified, suspect, rejected).
@@ -494,10 +510,13 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         conn = self.db.get_connection()
         now = time.time()
         with conn:
-            cur = conn.execute("SELECT validation_count, success_count, fail_count, status, consecutive_failures, confidence FROM learned_skills WHERE skill_id = ?", (skill_id,))
-            row = cur.fetchone()
-            if not row:
+            # Lock before reading counts so concurrent validations cannot
+            # overwrite each other's increments or change legacy ID resolution.
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._find_skill_row(conn, skill_id, game_id)
+            if row is None:
                 return {"skill_id": skill_id, "updated": False}
+            key = (row["game_id"], row["skill_id"])
 
             curr_status = row["status"]
             v_count = row["validation_count"]
@@ -508,7 +527,10 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             if is_execution_error:
                 # Transient environment / input failure: do NOT penalize rule confidence or change knowledge state!
                 f_count += 1
-                conn.execute("UPDATE learned_skills SET fail_count = ?, updated_at = ? WHERE skill_id = ?", (f_count, now, skill_id))
+                conn.execute(
+                    "UPDATE learned_skills SET fail_count = ?, updated_at = ? WHERE game_id = ? AND skill_id = ?",
+                    (f_count, now, *key),
+                )
                 logger.info("Skill '%s' execution error recorded without penalizing knowledge status (%s).", skill_id, reason)
                 return {
                     "skill_id": skill_id,
@@ -575,8 +597,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     status = ?,
                     consecutive_failures = ?,
                     updated_at = ?
-                WHERE skill_id = ?
-            """, (v_count, s_count, f_count, confidence, new_status, consec_fail, now, skill_id))
+                WHERE game_id = ? AND skill_id = ?
+            """, (v_count, s_count, f_count, confidence, new_status, consec_fail, now, *key))
 
             return {
                 "skill_id": skill_id,
@@ -588,10 +610,10 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 "updated": True
             }
 
-    def get_learned_skill(self, skill_id: str) -> Optional[LearnedSkillRecord]:
+    def get_learned_skill(self, skill_id: str, *, game_id: Optional[str] = None) -> Optional[LearnedSkillRecord]:
+        """Retrieve a game-scoped skill, or a uniquely named legacy skill."""
         conn = self.db.get_connection()
-        cur = conn.execute("SELECT * FROM learned_skills WHERE skill_id = ?", (skill_id,))
-        r = cur.fetchone()
+        r = self._find_skill_row(conn, skill_id, game_id)
         if not r:
             return None
         return LearnedSkillRecord(
@@ -670,10 +692,18 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         """Returns recorded UI states for a game."""
         return self.get_states(game_id=game_id, source=source)
 
-    def delete_learned_skill(self, skill_id: str) -> bool:
+    def delete_learned_skill(self, skill_id: str, *, game_id: Optional[str] = None) -> bool:
         conn = self.db.get_connection()
         with conn:
-            cur = conn.execute("DELETE FROM learned_skills WHERE skill_id = ?", (skill_id,))
+            if game_id is None:
+                conn.execute("BEGIN IMMEDIATE")
+                row = self._find_skill_row(conn, skill_id, game_id=None)
+                if row is None:
+                    return False
+                game_id = row["game_id"]
+            cur = conn.execute(
+                "DELETE FROM learned_skills WHERE game_id = ? AND skill_id = ?", (game_id, skill_id)
+            )
             return cur.rowcount > 0
 
     # ---------------------------------------------------------
@@ -938,7 +968,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                         skill_id, game_id, version, name, description, preconditions, steps, post_verification, status, validation_count, success_count, fail_count, confidence, source, created_at, updated_at, consecutive_failures, optimization_notes
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    sk["skill_id"], sk["game_id"], sk.get("version", "1.0.0"), sk["name"], sk.get("description", ""),
+                    sk["skill_id"], game_id, sk.get("version", "1.0.0"), sk["name"], sk.get("description", ""),
                     json.dumps(sk.get("preconditions", {})), json.dumps(sk.get("steps", [])), json.dumps(sk.get("post_verification", {})),
                     sk.get("status", "candidate"), sk.get("validation_count", 0), sk.get("success_count", 0), sk.get("fail_count", 0),
                     sk.get("confidence", 0.5), sk.get("source", "checkpoint"), sk.get("created_at", now), now,
@@ -1073,28 +1103,29 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         skill_id: str,
         new_steps: List[Dict[str, Any]],
         rationale: str = "",
-        new_version: Optional[str] = None
+        new_version: Optional[str] = None,
+        *,
+        game_id: Optional[str] = None,
     ) -> bool:
         conn = self.db.get_connection()
-        cur = conn.execute("SELECT version, name FROM learned_skills WHERE skill_id = ?", (skill_id,))
-        row = cur.fetchone()
-        if not row:
-            return False
-
-        old_ver = row["version"] or "1.0.0"
-        if new_version:
-            ver = new_version
-        else:
-            # Increment minor version e.g. 1.0.0 -> 1.1.0
-            parts = old_ver.split(".")
-            if len(parts) >= 2 and parts[1].isdigit():
-                parts[1] = str(int(parts[1]) + 1)
-                ver = ".".join(parts)
-            else:
-                ver = f"{old_ver}.1"
-
-        now = time.time()
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._find_skill_row(conn, skill_id, game_id)
+            if row is None:
+                return False
+
+            old_ver = row["version"] or "1.0.0"
+            if new_version:
+                ver = new_version
+            else:
+                # Increment minor version e.g. 1.0.0 -> 1.1.0
+                parts = old_ver.split(".")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    parts[1] = str(int(parts[1]) + 1)
+                    ver = ".".join(parts)
+                else:
+                    ver = f"{old_ver}.1"
+
             conn.execute("""
                 UPDATE learned_skills SET
                     steps = ?,
@@ -1102,8 +1133,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     optimization_notes = ?,
                     consecutive_failures = 0,
                     updated_at = ?
-                WHERE skill_id = ?
-            """, (json.dumps(new_steps), ver, rationale, now, skill_id))
+                WHERE game_id = ? AND skill_id = ?
+            """, (json.dumps(new_steps), ver, rationale, time.time(), row["game_id"], skill_id))
         logger.info("Optimized skill '%s' to version %s (notes: %s).", skill_id, ver, rationale)
         return True
 
