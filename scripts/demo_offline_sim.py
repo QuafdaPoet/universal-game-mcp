@@ -108,32 +108,12 @@ async def run_demo():
     fixture_file = generate_simulator_fixture()
     safety_manager.reset_emergency_stop()
 
-    # Isolate offline demo from host developer background anti-cheat services (e.g. vgc.exe)
-    try:
-        import psutil
-        _orig_iter = psutil.process_iter
-
-        def _safe_demo_iter(attrs=None):
-            for p in _orig_iter(attrs):
-                try:
-                    pname = p.info["name"] if attrs and "name" in attrs and hasattr(p, "info") and "name" in p.info else p.name()
-                    if any(b.lower() in pname.lower() for b in safety_manager._anti_cheat_blacklisted):
-                        continue
-                except Exception:
-                    pass
-                yield p
-
-        psutil.process_iter = _safe_demo_iter
-    except Exception:
-        pass
-
     # Initialize UGM Context with the Strategy Simulator Fixture
     ctx = UGMContext(
         offline_fixture=fixture_file,
         fixture_title="UGM Offline Strategy Simulator",
         fixture_process_name="offline_sim.exe"
     )
-    ctx.input_controller.dry_run_default = True
     server = create_server(ctx)
     sim_adapter = OfflineSimAdapter()
     regions = sim_adapter.get_ui_regions()

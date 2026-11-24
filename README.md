@@ -1,15 +1,14 @@
-# Universal Game MCP (UGM) - V2.0
+# Universal Game MCP (UGM) · V2 development
 
 [![Windows CI](https://github.com/QuafdaPoet/universal-game-mcp/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/QuafdaPoet/universal-game-mcp/actions/workflows/windows-ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![MCP SDK v2](https://img.shields.io/badge/MCP%20SDK-v2.3.0-green.svg)](https://github.com/modelcontextprotocol/python-sdk)
-[![Version: 2.0.0](https://img.shields.io/badge/Release-v2.0.0-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tested on Ryzen 5 5500U](https://img.shields.io/badge/Hardware-AMD%20Ryzen%205%205500U-orange.svg)]()
 
 > **English** | [Tiếng Việt (Vietnamese Guide)](docs/vi/README_vi.md) | [HOI4 Guide](docs/vi/HOI4_GUIDE_vi.md) | [Skill Packs](game_skills/README.md)
 
-**Universal Game MCP (UGM)** is a lightweight, CPU-friendly Model Context Protocol (MCP) server that empowers external AI agents (Claude, Gemini, GPT-4, etc.) to autonomously explore, navigate, learn, and play offline strategy and simulation games without requiring manual scripting, game-specific logic, secondary agent runtimes, or model fine-tuning.
+**Universal Game MCP (UGM)** is a lightweight, CPU-friendly Model Context Protocol (MCP) server that empowers external AI agents (Claude, Gemini, GPT-4, etc.) to inspect and interact with local, offline strategy and simulation games. Hearts of Iron IV is the bundled reference pack; other games may require their own pack and live validation.
 
 The AI model provides high-level reasoning and decision-making. Universal Game MCP provides:
 - **Eyes**: DXGI/GDI screen capture, event-driven OCR (RapidOCR PP-OCRv4), icon detection, and adaptive UI element exploration.
@@ -87,53 +86,16 @@ Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64, inte
 
 ---
 
-## 🛠 Complete MCP Tool Reference (34 Tools)
+## MCP tools
 
-### 1. Perception, Input & Safety Tools (12 Tools)
-| Tool Name | Parameters | Description |
-|---|---|---|
-| `get_game_window` | `window_title`, `process_name` | Finds and attaches to target game window; returns geometry, DPI scale, and client rect. |
-| `capture_screen` | `roi`, `save_to_disk`, `include_base64` | Captures current game frame with client rect coordinates. |
-| `read_text` | `roi`, `enhance_small_text` | Event-driven RapidOCR reading on normalized ROI. |
-| `locate_ui_element` | `selector_id`, `icon_name`, `text`, `threshold`, `roi` | Multimodal target resolution with ambiguity detection and escalation. |
-| `locate_icon` | `icon_name`, `threshold`, `roi` | Multi-scale OpenCV template matching with NMS. |
-| `hover_target` | `x`, `y`, `duration_ms` | Hovers mouse at normalized `(x, y)` and reads popup tooltip. |
-| `click_target` | `x`, `y`, `selector_id`, `dry_run`, `verify` | Clicks target dynamically; verifies visual state before confirming. |
-| `press_keys` | `keys`, `duration_ms`, `dry_run` | Sends DirectInput keystrokes (e.g. `['space']` for pause). |
-| `verify_state` | `expected_text`, `roi`, `pre_capture_id` | Computes visual difference and validates state transition. |
-| `verify_selection` | `expected_text`, `roi`, `pre_capture_id` | Verifies active UI element selection and text status. |
-| `emergency_stop` | `reason` | Instant global emergency killswitch halting all input dispatch. |
-| `save_training_sample` | `tag`, `label`, `metadata` | Opt-in recording of annotated game frames to `data/samples/`. |
+The stdio server implements MCP tool discovery. Use the client's `tools/list` result for the current argument names, types, and defaults. Start with these calls on the synthetic fixture:
 
-### 2. Memory, Navigation & Skill Execution Tools (11 Tools)
-| Tool Name | Parameters | Description |
-|---|---|---|
-| `list_game_packs` | none | Lists discovered curated packs and registered games in persistent memory. |
-| `get_ui_state` | `game_id`, `hint_state` | Classifies current game UI state (e.g. `main_map`, `production`) with confidence and evidence. |
-| `memory_search` | `game_id`, `query`, `search_type`, `limit` | Searches persistent SQLite memory across states, transitions, skills, or action history. |
-| `get_navigation_plan` | `target_state`, `start_state`, `game_id` | Calculates optimal multi-step navigation route using Dijkstra algorithm. |
-| `navigate_to` | `target_state`, `game_id`, `max_retries`, `dry_run` | Safely traverses menus step-by-step with state verification and replanning. |
-| `execute_skill` | `skill_id`, `game_id`, `params`, `dry_run` | Executes a curated or learned Game Skill with precondition/postcondition checks. |
-| `learn_skill` | `skill_id`, `name`, `steps`, `game_id`, `preconditions`, `post_verification` | Saves newly discovered action sequence as candidate skill in persistent memory. |
-| `list_learned_skills` | `game_id`, `status` | Lists procedurally learned skills, validation track records, and status. |
-| `get_learning_status` | `game_id` | Reports persistent memory statistics (states, transitions, action history, skills). |
-| `delete_learned_memory` | `game_id`, `skill_id`, `scope` | Safely deletes scoped memory or individual learned skill. |
-| `index_game_assets` | `game_path`, `game_id` | Read-only extraction of UI metadata and sprites from installed game files into local cache. |
-
-### 3. V2 Autonomous Exploration & Knowledge Lifecycle Tools (11 Tools)
-| Tool Name | Parameters | Description |
-|---|---|---|
-| `discover_and_attach_game` | `window_title`, `process_name`, `game_id` | Auto-detects active foreground/named game, registers baseline resolution, and initializes empty knowledge store. |
-| `explore_interactive_elements` | `roi`, `min_confidence`, `max_elements` | Scans active screen/ROI for interactive elements (buttons, icons, tabs, inputs) with bounding boxes. |
-| `probe_action` | `action`, `x`, `y`, `keys`, `roi`, `duration_ms`, `dry_run` | Non-destructive probing action with pre/post capture diff analysis and isolated change tracking. |
-| `manage_knowledge_state` | `item_type`, `item_id`, `new_status`, `reason`, `game_id` | Updates lifecycle state (`candidate`, `verified`, `suspect`, `rejected`) of states, transitions, or skills. |
-| `create_knowledge_checkpoint` | `label`, `game_id` | Creates an atomic point-in-time snapshot checkpoint of game knowledge. |
-| `rollback_knowledge_checkpoint` | `checkpoint_id`, `game_id` | Restores knowledge state to a previous point-in-time checkpoint. |
-| `list_knowledge_checkpoints` | `game_id` | Lists all available checkpoints with creation timestamps and metadata. |
-| `query_cross_game_concepts` | `category`, `tag` | Queries reusable abstract concepts and gameplay patterns applicable across titles. |
-| `register_cross_game_concept` | `concept_id`, `name`, `category`, `abstract_pattern`, `tags` | Registers an abstract gameplay pattern into cross-game knowledge store. |
-| `optimize_skill` | `skill_id`, `game_id`, `strip_redundant`, `tighten_delays` | Optimizes execution latency of a verified skill by removing redundant delays and probes. |
-| `prune_temporary_data` | `game_id`, `older_than_days`, `dry_run` | Safely cleans unpromoted candidates, rejected items, and transient exploration data. |
+| Tool | Arguments for first use |
+|---|---|
+| `list_game_packs` | `{}` |
+| `capture_screen` | `{}` captures the current fixture without saving an image |
+| `read_text` | `{"roi": [0, 0, 1, 0.1]}` reads the top strip |
+| `emergency_stop` | `{"reason": "stop requested"}` stops input |
 
 ---
 
@@ -156,61 +118,52 @@ game_skills/
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
-### 1. Installation
-Requires **Python 3.12** on Windows 10/11 x64:
+Python 3.12 is the CI baseline. Live window discovery and input require Windows 10/11 x64. The synthetic fixture can be used without an installed game.
 
 ```powershell
-# Clone repository
 git clone https://github.com/QuafdaPoet/universal-game-mcp.git
 cd universal-game-mcp
-
-# Create Python 3.12 virtualenv
-uv venv --python 3.12 .venv
-# or: python -m venv .venv
-
-# Activate virtualenv
-.\.venv\Scripts\activate
-
-# Install dependencies in editable mode
-pip install -e .
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+.\.venv\Scripts\python.exe -m ugm.server --fixture tests/fixtures/sim_fixture.png --dry-run
 ```
 
-### 2. Generate Test Fixtures & Run Offline Tests
-```powershell
-# Generate offline test fixtures
-python scripts/generate_fixtures.py
+The last command starts a **stdio** server that expects a client; output is not an interactive shell. In fixture mode a missing or unreadable image stops startup, and hardware input cannot be enabled by a tool call. A minimal MCP client configuration:
 
-# Run automated tests (100% offline, no game required)
-pytest -v
-```
-
-### 3. Run CPU Latency & RAM Profiling Benchmark
-```powershell
-python scripts/benchmark_cpu_ram.py
-```
-
-### 4. Starting the Universal Game MCP Server
-```powershell
-# Run with stdio transport (Claude Desktop, Cursor, or Antigravity IDE)
-python -m ugm.server
-
-# Or enforce dry-run server-wide (inviolable hardware simulation)
-python -m ugm.server --dry-run
-```
-
-#### MCP Client Configuration (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
     "universal-game-mcp": {
-      "command": "C:\\Users\\<USER>\\...\\universal-game-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "ugm.server"]
+      "command": "C:/path/to/universal-game-mcp/.venv/Scripts/python.exe",
+      "args": [
+        "-m", "ugm.server", "--dry-run",
+        "--fixture", "C:/path/to/universal-game-mcp/tests/fixtures/sim_fixture.png",
+        "--db-path", "C:/path/to/universal-game-mcp/data/memory/demo.db"
+      ]
     }
   }
 }
 ```
+
+Use absolute paths in client configuration. Built-in HOI4 resources load from the installed package regardless of working directory. The default database remains `data/memory/ugm_memory.db` relative to launch directory, for compatibility; use `--db-path` to select it explicitly. Dry-run prevents hardware input; it is not a filesystem sandbox, and local data tools can still write files or SQLite records. Use a trusted local MCP client and a separate database for trials.
+
+### Developer verification
+
+After activating the environment, run the checks from the checkout root:
+
+```text
+python scripts/generate_fixtures.py
+python -m pytest -v --tb=short
+python scripts/smoke_test_mcp_subprocess.py
+python scripts/benchmark_cpu_ram.py
+python scripts/demo_offline_sim.py
+python -m pip wheel --no-deps -w dist .
+```
+
+The benchmark is synthetic, not a live-game performance promise. Keep generated fixture changes and personal database files out of commits unless intentionally updating fixtures.
 
 ---
 

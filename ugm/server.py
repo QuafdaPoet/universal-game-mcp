@@ -13,10 +13,13 @@ import time
 import logging
 from typing import Optional, List, Dict, Any
 from dataclasses import asdict
+from pathlib import Path
+from uuid import uuid4
 import cv2
 import numpy as np
 from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from .core.types import (
     NormalizedRect,
     BoundingBox,
@@ -68,6 +71,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ugm.server")
 
+DEFAULT_SKILLS_PACK = str(Path(__file__).resolve().parent.parent / "game_skills" / "hoi4")
+
 
 class UGMContext:
     """Dependency container holding game MCP subsystems."""
@@ -76,13 +81,15 @@ class UGMContext:
         self,
         offline_fixture: Optional[str] = None,
         ocr_backend: str = "rapidocr",
-        skills_pack_dir: Optional[str] = "game_skills/hoi4",
+        skills_pack_dir: Optional[str] = DEFAULT_SKILLS_PACK,
         db_path: Optional[str] = None,
         fixture_title: Optional[str] = None,
         fixture_process_name: Optional[str] = None
     ):
         self.window_manager = WindowManager()
-        self.capture_manager = CaptureManager()
+        self.capture_manager = CaptureManager(
+            backend_override=FixtureBackend() if offline_fixture is not None else None
+        )
         self.ocr_engine: BaseOCREngine = get_ocr_engine(backend=ocr_backend, min_score=0.45, use_cls=False)
         self.icon_detector = IconDetector(default_threshold=0.80)
         self.input_controller = InputController(self.window_manager, dry_run_default=False)
@@ -172,7 +179,7 @@ class UGMContext:
         self.active_game_id: str = "hoi4"
         self.explorer.active_game_id = self.active_game_id
 
-        if offline_fixture and os.path.exists(offline_fixture):
+        if offline_fixture is not None:
             self.setup_offline_fixture(offline_fixture, title=fixture_title, process_name=fixture_process_name)
 
     def discover_and_attach(
@@ -359,15 +366,16 @@ class UGMContext:
         self.window_manager.set_mock_window(mock_win)
         fixture_backend = FixtureBackend(img)
         self.capture_manager.set_backend(fixture_backend)
+        self.input_controller.enforce_dry_run = True
         logger.info("UGM configured in offline fixture mode using %s (%dx%d)", fixture_path, w, h)
 
 
 def create_server(context: Optional[UGMContext] = None) -> MCPServer:
-    """Creates and configures the MCP server with the 10 standard UGM tools."""
+    """Creates and configures the MCP server with the UGM tools."""
     ctx = context or UGMContext()
     server = MCPServer(
         name="universal-game-mcp",
-        version="1.5.0",
+        version=__version__,
         instructions="Universal Game MCP (UGM) allows AI agents to observe, read text, locate icons, interact safely, navigate menus, execute game skills, and learn verified procedural knowledge across game sessions."
     )
 
@@ -404,7 +412,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Optional 'roi' parameter specifies [x, y, width, height] normalized coordinates (0.0 to 1.0).
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window, roi=norm_roi)
+        full_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        frame = full_frame
+        if norm_roi is not None:
+            box = norm_roi.to_pixel(full_frame.shape[1], full_frame.shape[0])
+            frame = full_frame[box.y:box.bottom, box.x:box.right]
 
         h, w = frame.shape[:2]
         saved_file = None
@@ -412,8 +424,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             saved_file = ctx.capture_manager.save_image(frame, save_path)
 
         preview_b64 = ctx.capture_manager.encode_base64_png(frame)
-        cap_id = f"cap_{int(time.time() * 1000)}"
-        ctx.pre_capture_cache[cap_id] = frame
+        cap_id = f"cap_{uuid4().hex}"
+        ctx.pre_capture_cache[cap_id] = full_frame
 
         # Keep cache bounded
         if len(ctx.pre_capture_cache) > 10:
@@ -678,8 +690,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         min_diff_ratio: float = 0.005
     ) -> Dict[str, Any]:
         """
-        Verifies visual game state comparing against pre_capture_id or baseline frame.
-        Optionally validates that expected_text appears in the target ROI.
+        Without a baseline, checks that expected_text appears in the current frame or ROI.
+        With pre_capture_id, checks frame change and any requested text in full-window coordinates.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
         post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
@@ -705,6 +717,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                     "details": {"error": "missing_baseline"}
                 }
             pre_frame = post_frame
+            if expected_text is not None:
+                min_diff_ratio = 0.0
 
         ver_res = ctx.verifier.verify_selection(
             pre_frame=pre_frame,
@@ -1283,9 +1297,13 @@ def main():
     parser = argparse.ArgumentParser(description="Universal Game MCP Server (UGM)")
     parser.add_argument("--fixture", type=str, default=None, help="Path to offline fixture image for testing")
     parser.add_argument("--dry-run", action="store_true", help="Enforce dry-run mode for all input actions")
+    parser.add_argument("--db-path", type=Path, help="SQLite knowledge database path")
+    parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args()
+    if args.fixture is not None and not Path(args.fixture).is_file():
+        parser.error("the fixture must be an existing image file")
 
-    ctx = UGMContext(offline_fixture=args.fixture)
+    ctx = UGMContext(offline_fixture=args.fixture, db_path=args.db_path)
     if args.dry_run:
         safety_manager.set_dry_run_enforced(True)
         ctx.input_controller.dry_run_default = True
