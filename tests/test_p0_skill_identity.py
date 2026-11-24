@@ -30,22 +30,8 @@ def storage(tmp_path):
 def _make_legacy_db(path, skill_id="pause"):
     """Create the exact v2 learned_skill table, including nullable legacy PK."""
     with sqlite3.connect(path) as conn:
-        conn.executescript("""
-            CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
-            INSERT INTO schema_version VALUES (1, 1.0), (2, 2.0);
-            CREATE TABLE learned_skills (
-                skill_id TEXT PRIMARY KEY, game_id TEXT NOT NULL,
-                version TEXT NOT NULL DEFAULT '1.0.0', name TEXT NOT NULL,
-                description TEXT, preconditions TEXT, steps TEXT NOT NULL,
-                post_verification TEXT, status TEXT NOT NULL DEFAULT 'candidate',
-                validation_count INTEGER NOT NULL DEFAULT 0,
-                success_count INTEGER NOT NULL DEFAULT 0, fail_count INTEGER NOT NULL DEFAULT 0,
-                confidence REAL NOT NULL DEFAULT 0.5, source TEXT NOT NULL DEFAULT 'live',
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                consecutive_failures INTEGER NOT NULL DEFAULT 0, optimization_notes TEXT
-            );
-            CREATE INDEX idx_learned_skills_game ON learned_skills(game_id, status);
-        """)
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL)")
+        DatabaseManager.__new__(DatabaseManager)._migrate(conn, from_ver=0, to_ver=2)
         conn.execute("""
             INSERT INTO learned_skills VALUES (?, 'game_a', '1.2.3', 'Pause', 'Starts pause',
                 '{"window_focused": true}', '[]', '{}', 'verified', 9, 8, 1, 0.9, 'live',

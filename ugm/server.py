@@ -1160,20 +1160,29 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         item_id: str,
         status: str,
         game_id: Optional[str] = None,
-        reason: str = ""
+        reason: str = "",
+        transition_identity: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Updates knowledge lifecycle state (candidate, verified, suspect, rejected)
-        for a learned skill, transition, or selector.
+        for a learned skill, transition, or selector. Reject a curated transition with no
+        row by providing transition_identity {from_state, to_state, action_type, params}
+        and an empty item_id. Quarantined routes stay blocked across checkpoint rollback.
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
-        updated = ctx.storage.update_knowledge_state(
-            game_id=target_game_id,
-            item_type=item_type,
-            item_id=item_id,
-            new_status=status,
-            reason=reason
-        )
+        if transition_identity is not None:
+            fields = {"from_state", "to_state", "action_type", "params"}
+            if item_type != "transition" or status != "rejected" or item_id or set(transition_identity) != fields:
+                raise ValueError("transition_identity requires transition rejection, empty item_id and an exact edge.")
+            updated = ctx.storage.quarantine_route(target_game_id, **transition_identity, reason=reason)
+        else:
+            updated = ctx.storage.update_knowledge_state(
+                game_id=target_game_id,
+                item_type=item_type,
+                item_id=item_id,
+                new_status=status,
+                reason=reason,
+            )
         return {
             "success": updated,
             "game_id": target_game_id,
@@ -1210,7 +1219,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         game_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Atomically restores game knowledge to a previously saved checkpoint.
+        Atomically restores game knowledge from a supported checkpoint. Rejected routes
+        stay quarantined. Legacy/lossy or invalid checkpoints are not applied.
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
         success = ctx.storage.rollback_checkpoint(game_id=target_game_id, checkpoint_id=checkpoint_id)

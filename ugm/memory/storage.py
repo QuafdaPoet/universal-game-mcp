@@ -11,12 +11,16 @@ import json
 import time
 import tempfile
 import logging
+import sqlite3
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 
+from .checkpoints import encode_snapshot, restore_snapshot
 from .database import DatabaseManager, compute_dhash, hamming_distance
 from ..skills.contracts import PersistentKnowledgeStorageContract
 from ..core.safety import SafetyViolationError
+
+from .transition_quarantine import get_quarantined_transitions, quarantine_transition, transition_identity
 
 logger = logging.getLogger("ugm.memory.storage")
 
@@ -242,7 +246,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         """Records a verified or failed navigation transition between states with 4-state lifecycle."""
         conn = self.db.get_connection()
         now = time.time()
-        param_str = json.dumps(params, sort_keys=True)
+        key = transition_identity(from_state, to_state, action_type, params)
+        param_str = key[-1]
         ev_str = json.dumps(evidence or {})
 
         if is_execution_error:
@@ -273,6 +278,8 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     game_id, from_state, to_state, action_type, param_str, cost,
                     succ_cnt, fail_cnt, conf, ev_str, source, now, now, init_status, c_fail
                 ))
+                if init_status == "rejected":
+                    quarantine_transition(conn, game_id, key, now, "recorded_rejected_transition")
             else:
                 succ_cnt = row["success_count"] + (1 if success else 0)
                 fail_cnt = row["fail_count"] + (0 if success else 1)
@@ -314,8 +321,30 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                         consecutive_failures = ?
                     WHERE id = ?
                 """, (succ_cnt, fail_cnt, conf, cost, ev_str, now, new_status, c_fail, row["id"]))
+                if new_status == "rejected":
+                    quarantine_transition(conn, game_id, key, now, "recorded_rejected_transition")
+
 
     save_transition = record_transition
+
+    def quarantine_route(self, game_id: str, from_state: str, to_state: str,
+                         action_type: str, params: Dict[str, Any], reason: str = "") -> bool:
+        """Suppress an exact route even if a curated edge has no historical row."""
+        if not isinstance(game_id, str) or not game_id.strip():
+            raise ValueError("Transition quarantine requires a game_id.")
+        key = transition_identity(from_state, to_state, action_type, params)
+        conn = self.db.get_connection()
+        now = time.time()
+        with conn:
+            quarantine_transition(conn, game_id, key, now, reason or "explicit_route_rejection")
+            conn.execute("""
+                UPDATE navigation_transitions SET status = 'rejected', updated_at = ?
+                WHERE game_id = ? AND from_state = ? AND to_state = ? AND action_type = ? AND params = ?
+            """, (now, game_id, *key))
+        return True
+
+    def get_quarantined_routes(self, game_id: str, from_state: Optional[str] = None) -> set:
+        return get_quarantined_transitions(self.db.get_connection(), game_id, from_state)
 
     def get_transitions(
         self,
@@ -881,110 +910,41 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
     # V2 Knowledge Checkpointing & Rollback
     # ---------------------------------------------------------
     def create_checkpoint(self, game_id: str, label: str, description: str = "") -> int:
-        """
-        Creates an atomic point-in-time snapshot of all learned knowledge for a game.
-        Protects against accidental memory corruption or misleading observations during exploration.
-        """
+        """Save a consistent snapshot of one game's four mutable knowledge tables."""
         conn = self.db.get_connection()
-        now = time.time()
-        states = [asdict(s) for s in self.get_states(game_id)]
-        transitions = [asdict(t) for t in self.get_transitions(game_id)]
-        skills = [asdict(k) for k in self.list_learned_skills(game_id)]
-
-        cur = conn.execute("SELECT selector_id, state_name, selector_data, confidence, status FROM selectors_memory WHERE game_id = ?", (game_id,))
-        selectors = [dict(r) for r in cur.fetchall()]
-
-        snapshot = {
-            "game_id": game_id,
-            "timestamp": now,
-            "label": label,
-            "description": description,
-            "ui_states": states,
-            "transitions": transitions,
-            "learned_skills": skills,
-            "selectors": selectors
-        }
-        snap_json = json.dumps(snapshot)
-
         with conn:
+            # A deferred read could race another writer before the checkpoint
+            # row is committed. Acquire the write reservation before reading.
+            conn.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            payload = encode_snapshot(conn, game_id, simulation=self.db.simulation)
             cur = conn.execute("""
                 INSERT INTO checkpoints (game_id, label, description, snapshot_data, created_at)
                 VALUES (?, ?, ?, ?, ?)
-            """, (game_id, label, description, snap_json, now))
+            """, (game_id, label, description, payload, now))
             checkpoint_id = cur.lastrowid
-            logger.info("Created knowledge checkpoint %d ('%s') for game '%s'.", checkpoint_id, label, game_id)
-            return checkpoint_id
+        logger.info("Created knowledge checkpoint %d ('%s') for game '%s'.", checkpoint_id, label, game_id)
+        return checkpoint_id
 
     def rollback_checkpoint(self, game_id: str, checkpoint_id: int) -> bool:
-        """
-        Atomically restores knowledge to a previously saved checkpoint.
-        """
+        """Restore complete versioned knowledge, or leave current rows unchanged."""
         conn = self.db.get_connection()
-        cur = conn.execute("SELECT snapshot_data FROM checkpoints WHERE id = ? AND game_id = ?", (checkpoint_id, game_id))
-        row = cur.fetchone()
-        if not row:
-            logger.error("Checkpoint %d for game '%s' not found.", checkpoint_id, game_id)
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT snapshot_data FROM checkpoints WHERE id = ? AND game_id = ?",
+                    (checkpoint_id, game_id),
+                ).fetchone()
+                if row is None:
+                    logger.warning("Checkpoint %d for game '%s' not found.", checkpoint_id, game_id)
+                    return False
+                restore_snapshot(conn, game_id, row["snapshot_data"], simulation=self.db.simulation)
+        except (ValueError, RecursionError, sqlite3.IntegrityError) as exc:
+            # Catch outside the transaction context so even a conflict in the
+            # final table cannot commit an earlier portion of the restore.
+            logger.warning("Refused checkpoint %d for game '%s': %s", checkpoint_id, game_id, exc)
             return False
-
-        snapshot = json.loads(row["snapshot_data"])
-        now = time.time()
-
-        with conn:
-            # 1. Clear current knowledge for this game
-            conn.execute("DELETE FROM ui_states WHERE game_id = ?", (game_id,))
-            conn.execute("DELETE FROM navigation_transitions WHERE game_id = ?", (game_id,))
-            conn.execute("DELETE FROM learned_skills WHERE game_id = ?", (game_id,))
-            conn.execute("DELETE FROM selectors_memory WHERE game_id = ?", (game_id,))
-
-            # 2. Restore ui_states
-            for s in snapshot.get("ui_states", []):
-                conn.execute("""
-                    INSERT OR REPLACE INTO ui_states (game_id, state_name, phash, confidence, evidence, metadata, source, first_seen, last_seen, occurrences)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    s["game_id"], s["state_name"], s["phash"], s["confidence"],
-                    json.dumps(s.get("evidence", {})), json.dumps(s.get("metadata", {})),
-                    s.get("source", "checkpoint"), s.get("first_seen", now), s.get("last_seen", now), s.get("occurrences", 1)
-                ))
-
-            # 3. Restore navigation_transitions
-            for t in snapshot.get("transitions", []):
-                conn.execute("""
-                    INSERT OR REPLACE INTO navigation_transitions (
-                        game_id, from_state, to_state, action_type, params, cost, success_count, fail_count, confidence, evidence, source, created_at, updated_at, status, consecutive_failures
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    t["game_id"], t["from_state"], t["to_state"], t["action_type"],
-                    json.dumps(t["params"]) if isinstance(t["params"], dict) else str(t["params"]),
-                    t["cost"], t["success_count"], t["fail_count"], t["confidence"],
-                    json.dumps(t.get("evidence", {})), t.get("source", "checkpoint"),
-                    t.get("created_at", now), now, t.get("status", "candidate"), t.get("consecutive_failures", 0)
-                ))
-
-            # 4. Restore learned_skills
-            for sk in snapshot.get("learned_skills", []):
-                conn.execute("""
-                    INSERT OR REPLACE INTO learned_skills (
-                        skill_id, game_id, version, name, description, preconditions, steps, post_verification, status, validation_count, success_count, fail_count, confidence, source, created_at, updated_at, consecutive_failures, optimization_notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    sk["skill_id"], game_id, sk.get("version", "1.0.0"), sk["name"], sk.get("description", ""),
-                    json.dumps(sk.get("preconditions", {})), json.dumps(sk.get("steps", [])), json.dumps(sk.get("post_verification", {})),
-                    sk.get("status", "candidate"), sk.get("validation_count", 0), sk.get("success_count", 0), sk.get("fail_count", 0),
-                    sk.get("confidence", 0.5), sk.get("source", "checkpoint"), sk.get("created_at", now), now,
-                    sk.get("consecutive_failures", 0), sk.get("optimization_notes", None)
-                ))
-
-            # 5. Restore selectors_memory
-            for sel in snapshot.get("selectors", []):
-                conn.execute("""
-                    INSERT OR REPLACE INTO selectors_memory (game_id, selector_id, state_name, selector_data, confidence, success_count, fail_count, last_verified, source, status, consecutive_failures)
-                    VALUES (?, ?, ?, ?, ?, 1, 0, ?, 'checkpoint', ?, 0)
-                """, (
-                    game_id, sel["selector_id"], sel.get("state_name", "global"),
-                    sel.get("selector_data", "{}") if isinstance(sel.get("selector_data"), str) else json.dumps(sel.get("selector_data", {})),
-                    sel.get("confidence", 1.0), now, sel.get("status", "candidate")
-                ))
 
         logger.info("Successfully rolled back game '%s' knowledge to checkpoint %d.", game_id, checkpoint_id)
         return True
@@ -1033,6 +993,15 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     cur = conn.execute("UPDATE navigation_transitions SET status = ?, consecutive_failures = 0, updated_at = ? WHERE game_id = ? AND id = ?", (new_status, now, game_id, int(item_id)))
                 else:
                     cur = conn.execute("UPDATE navigation_transitions SET status = ?, updated_at = ? WHERE game_id = ? AND id = ?", (new_status, now, game_id, int(item_id)))
+                if cur.rowcount > 0 and new_status == "rejected":
+                    row = conn.execute("""
+                        SELECT from_state, to_state, action_type, params FROM navigation_transitions
+                        WHERE game_id = ? AND id = ?
+                    """, (game_id, int(item_id))).fetchone()
+                    key = transition_identity(
+                        row["from_state"], row["to_state"], row["action_type"], json.loads(row["params"]),
+                    )
+                    quarantine_transition(conn, game_id, key, now, reason or "explicit_status_rejection")
                 return cur.rowcount > 0
             elif item_type == "selector":
                 if new_status == "verified":

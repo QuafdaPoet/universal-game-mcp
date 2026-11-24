@@ -15,9 +15,11 @@ from typing import Optional, List, Dict, Any, Tuple
 import numpy as np
 import cv2
 
+from .transition_quarantine import quarantine_transition, transition_identity
+
 logger = logging.getLogger("ugm.memory.database")
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 _SIMULATION_APPLICATION_ID = 0x55474D53  # 'UGMS'
 SIMULATION_DB_SUFFIX = ".simulation"
 
@@ -374,5 +376,28 @@ class DatabaseManager:
                 CREATE INDEX idx_learned_skills_id ON learned_skills (skill_id);
             """)
             conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (3, ?)", (time.time(),))
+
+        if from_ver < 4 <= to_ver:
+            self._execute_migration_script(conn, """
+                CREATE TABLE transition_quarantine (
+                    game_id TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    params TEXT NOT NULL,
+                    rejected_at REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    PRIMARY KEY (game_id, from_state, to_state, action_type, params)
+                );
+            """)
+            for row in conn.execute("""
+                SELECT game_id, from_state, to_state, action_type, params, updated_at
+                FROM navigation_transitions WHERE status = 'rejected'
+            """):
+                key = transition_identity(
+                    row["from_state"], row["to_state"], row["action_type"], json.loads(row["params"]),
+                )
+                quarantine_transition(conn, row["game_id"], key, row["updated_at"], "migrated_rejected_transition")
+            conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (4, ?)", (time.time(),))
 
         logger.info("Database schema migration to v%d complete.", to_ver)

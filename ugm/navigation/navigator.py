@@ -201,6 +201,9 @@ class UINavigator:
             )
 
             # Execute action
+            if not self.graph.is_edge_eligible(edge):
+                halt_reason = "queued transition is no longer eligible"
+                break
             exec_ok, exec_err = self._dispatch_navigation_action(edge, dry_run=effective_dry_run)
             if not exec_ok:
                 step_log = NavigationStepLog(
