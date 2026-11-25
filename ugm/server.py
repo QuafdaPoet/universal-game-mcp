@@ -116,7 +116,9 @@ class UGMContext:
         db_path: Optional[str] = None,
         fixture_title: Optional[str] = None,
         fixture_process_name: Optional[str] = None,
-        enforce_dry_run: bool = False
+        enforce_dry_run: bool = False,
+        *,
+        ocr_intra_op_threads: Optional[int] = None,
     ):
         self.window_manager = WindowManager()
         self._offline_fixture_configured = False
@@ -129,6 +131,8 @@ class UGMContext:
         ocr_options = {}
         if backend_key in {"rapidocr", "rapidocr_lite", "rapidocrlite", "lite"}:
             ocr_options["min_score"] = 0.45
+            if ocr_intra_op_threads is not None:
+                ocr_options["intra_op_threads"] = ocr_intra_op_threads
         self.ocr_engine: BaseOCREngine = get_ocr_engine(backend=ocr_backend, **ocr_options)
         self.icon_detector = IconDetector(default_threshold=0.80)
         self.simulation_session = (

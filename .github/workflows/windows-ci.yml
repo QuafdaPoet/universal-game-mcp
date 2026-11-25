@@ -46,7 +46,17 @@ jobs:
         run: |
           python -m scripts.benchmark_mcp_capture_memory --width 1920
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m scripts.benchmark_mcp_capture_memory --width 3840
+          $reference = $null
+          foreach ($threads in -1, 2, 4) {
+            $output = python -m scripts.benchmark_mcp_capture_memory --width 3840 --ocr-threads $threads
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Output $output
+            $data = $output | ConvertFrom-Json
+            if ($null -eq $reference) { $reference = $data.ocr_text_and_boxes_sha256 }
+            elseif ($reference -ne $data.ocr_text_and_boxes_sha256) {
+              throw "OCR text or normalized boxes changed across thread profiles."
+            }
+          }
 
       - name: Run End-to-End Offline Simulator Demo
         run: |

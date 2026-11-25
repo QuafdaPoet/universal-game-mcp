@@ -90,3 +90,13 @@ MCP with a small preview ROI, and report cache bytes, ending RSS and OS process
 peak RSS/working set in bytes. Peak includes startup and OCR warmup. It is not a
 live-game measurement or an end-to-end guarantee of the 250 MB target. The older
 direct fixture benchmark does not exercise this cache and reports final RSS only.
+
+
+RapidOCR now applies its CPU thread setting to the pinned ONNX sessions (four
+threads for RapidOCR and two for Lite, capped at available logical CPUs). The
+synthetic MCP memory script accepts `--ocr-threads -1`, `--ocr-threads 2`, or
+`--ocr-threads 4`; run each arm in a fresh process. Per-phase OS peaks are
+cumulative high-water marks, not isolated phase maxima. CI checks that the
+expected fixture text and normalized boxes agree across the 4K comparisons.
+That does not establish OCR equivalence on other games or languages. Orientation
+classifier construction and the separate dataset opt-out remain open work.
