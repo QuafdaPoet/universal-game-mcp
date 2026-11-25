@@ -11,12 +11,17 @@ import json
 import base64
 import time
 import logging
-from typing import Optional, List, Dict, Any
-from dataclasses import asdict
+from typing import Optional, List, Dict, Any, Annotated
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from threading import Lock
+from uuid import uuid4
 import cv2
 import numpy as np
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
+from . import __version__
 from .core.types import (
     NormalizedRect,
     BoundingBox,
@@ -31,7 +36,7 @@ from .core.types import (
     VisionAgentEscalation,
 )
 from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
-from .core.window import WindowManager
+from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
@@ -43,7 +48,7 @@ from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
 # V1.5 Subsystems
-from .memory.database import DatabaseManager
+from .memory.database import DatabaseManager, SIMULATION_DB_SUFFIX
 from .memory.storage import PersistentKnowledgeStorage
 from .navigation.recognizer import UIStateRecognizer, UIStateDetection
 from .navigation.graph import NavigationGraph, PathResult
@@ -52,7 +57,7 @@ from .skills.engine import SkillExecutionEngine, SkillExecutionResult
 from .skills.learner import SkillLearner
 from .skills.contracts import NavigationNode, NavigationEdge
 from .assets.indexer import GameAssetIndexer
-from .core.explorer import UIExplorer, UIElementCandidate
+from .core.explorer import UIExplorer, UIElementCandidate, PROBE_TIMEOUT_MIN_S, PROBE_TIMEOUT_MAX_S
 
 # Ensure UTF-8 output on Windows
 if sys.platform == "win32":
@@ -68,6 +73,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ugm.server")
 
+DEFAULT_SKILLS_PACK = str(Path(__file__).resolve().parent.parent / "game_skills" / "hoi4")
+
+
+BASELINE_MAX_AGE_S = 60.0
+BASELINE_MAX_COUNT = 10
+BASELINE_MAX_BYTES = 32 * 1024**2
+_baseline_clock = time.monotonic
+
+
+class InvalidVerificationBaseline(ValueError):
+    """The caller must capture a new same-scope verification baseline."""
+
+
+@dataclass(frozen=True)
+class ObservationScope:
+    attachment_revision: int
+    binding: Optional[tuple]
+    simulation: bool
+    fixture: bool
+    backend_revision: int
+
+
+@dataclass(frozen=True)
+class VerificationBaseline:
+    frame: np.ndarray
+    scope: ObservationScope
+    captured_at: float
+
+    def is_fresh(self, now: Optional[float] = None) -> bool:
+        return 0 <= (now if now is not None else _baseline_clock()) - self.captured_at < BASELINE_MAX_AGE_S
+
 
 class UGMContext:
     """Dependency container holding game MCP subsystems."""
@@ -76,17 +112,37 @@ class UGMContext:
         self,
         offline_fixture: Optional[str] = None,
         ocr_backend: str = "rapidocr",
-        skills_pack_dir: Optional[str] = "game_skills/hoi4",
-        db_path: Optional[str] = None
+        skills_pack_dir: Optional[str] = DEFAULT_SKILLS_PACK,
+        db_path: Optional[str] = None,
+        fixture_title: Optional[str] = None,
+        fixture_process_name: Optional[str] = None,
+        enforce_dry_run: bool = False,
+        *,
+        ocr_intra_op_threads: Optional[int] = None,
     ):
         self.window_manager = WindowManager()
-        self.capture_manager = CaptureManager()
-        self.ocr_engine: BaseOCREngine = get_ocr_engine(backend=ocr_backend, min_score=0.45, use_cls=False)
+        self._offline_fixture_configured = False
+        self.capture_manager = CaptureManager(
+            backend_override=FixtureBackend() if offline_fixture is not None else None,
+            allow_fixture_fallback=False,
+            require_window=True,
+        )
+        backend_key = ocr_backend.strip().lower()
+        ocr_options = {}
+        if backend_key in {"rapidocr", "rapidocr_lite", "rapidocrlite", "lite"}:
+            ocr_options["min_score"] = 0.45
+            if ocr_intra_op_threads is not None:
+                ocr_options["intra_op_threads"] = ocr_intra_op_threads
+        self.ocr_engine: BaseOCREngine = get_ocr_engine(backend=ocr_backend, **ocr_options)
         self.icon_detector = IconDetector(default_threshold=0.80)
-        self.input_controller = InputController(self.window_manager, dry_run_default=False)
+        self.simulation_session = (
+            offline_fixture is not None or enforce_dry_run or safety_manager.is_dry_run_enforced
+        )
+        self.input_controller = InputController(self.window_manager, enforce_dry_run=self.simulation_session)
         self.verifier = ActionVerifier(self.capture_manager, self.ocr_engine, self.input_controller)
         self.dataset_collector = DatasetCollector()
-        self.pre_capture_cache: Dict[str, np.ndarray] = {}
+        self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
+        self._baseline_lock = Lock()
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -125,7 +181,8 @@ class UGMContext:
                 logger.debug("Skill pack autoload notice for %s: %s", skills_pack_dir, e)
 
         # V1.5 Persistent Memory & Knowledge Storage
-        self.storage = PersistentKnowledgeStorage(DatabaseManager(db_path or "data/memory/ugm_memory.db"))
+        self._knowledge_db_path = Path(db_path or "data/memory/ugm_memory.db").resolve()
+        self.storage = self._open_knowledge_storage(simulation=self.simulation_session)
         self._init_default_game_metadata()
 
         # V1.5 UI State Recognizer
@@ -170,8 +227,8 @@ class UGMContext:
         self.active_game_id: str = "hoi4"
         self.explorer.active_game_id = self.active_game_id
 
-        if offline_fixture and os.path.exists(offline_fixture):
-            self.setup_offline_fixture(offline_fixture)
+        if offline_fixture is not None:
+            self.setup_offline_fixture(offline_fixture, title=fixture_title, process_name=fixture_process_name)
 
     def discover_and_attach(
         self,
@@ -184,39 +241,23 @@ class UGMContext:
         If the game is new/unknown, registers it in persistent memory with an initially empty
         knowledge state and provisions an empty navigation graph.
         """
+        safety_manager.check_safety()
         win = None
         if window_title or process_name:
             win = self.window_manager.find_window(window_title=window_title, process_name=process_name)
-
-        if win is None and auto_detect_foreground and not (window_title or process_name):
+        elif auto_detect_foreground:
             win = self.window_manager.get_foreground_window()
-            if win is None:
-                win = self.window_manager.current_window
 
         if win is None:
-            if window_title or process_name:
-                win = WindowInfo(
-                    hwnd=8888,
-                    title=window_title or process_name,
-                    process_name=process_name or f"{window_title.lower().replace(' ', '_')}.exe",
-                    pid=5678,
-                    x=0, y=0, width=1920, height=1080,
-                    client_x=0, client_y=0, client_width=1920, client_height=1080,
-                    is_minimized=False,
-                    is_focused=True
-                )
-            else:
-                return {
-                    "attached": False,
-                    "message": f"Could not find or attach to game window (title='{window_title}', process='{process_name}').",
-                    "game_id": None,
-                    "window": None
-                }
+            return {
+                "attached": False,
+                "status": "not_found",
+                "message": f"Could not find or attach to game window (title='{window_title}', process='{process_name}').",
+                "game_id": None,
+                "window": None
+            }
 
-        # Derive sanitized game_id from process_name or title
-        raw_name = win.process_name or win.title or "unknown_game"
-        clean_name = raw_name.lower().replace(".exe", "")
-        game_id = "".join(c if c.isalnum() or c == "_" else "_" for c in clean_name).strip("_") or "unknown_game"
+        game_id = game_id_for_window(win)
 
         self.active_game_id = game_id
         self.window_manager.attach_window(win)
@@ -234,9 +275,7 @@ class UGMContext:
             )
             is_new = True
 
-        # Ensure empty navigation graph is available
-        if game_id not in self.navigation_graphs:
-            self.navigation_graphs[game_id] = NavigationGraph(game_id=game_id, storage=self.storage)
+        self.get_navigation_graph(game_id)
 
         stats = self.storage.get_statistics(game_id=game_id)
 
@@ -257,6 +296,13 @@ class UGMContext:
             },
             "message": f"Attached to game '{game_id}' ({'newly initialized with empty GameSkill' if is_new else 'resumed existing session'})."
         }
+
+    def _open_knowledge_storage(self, *, simulation: bool) -> PersistentKnowledgeStorage:
+        path = str(self._knowledge_db_path)
+        if simulation:
+            if not path.casefold().endswith(SIMULATION_DB_SUFFIX):
+                path += SIMULATION_DB_SUFFIX
+        return PersistentKnowledgeStorage(DatabaseManager(path, simulation=simulation))
 
     def _init_default_game_metadata(self) -> None:
         try:
@@ -326,16 +372,35 @@ class UGMContext:
         graph.register_edge(NavigationEdge("main_view", "paused", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
         graph.register_edge(NavigationEdge("paused", "main_view", "press_keys", {"keys": ["space"]}, cost=1.0), persist=False)
 
-    def setup_offline_fixture(self, fixture_path: str) -> None:
+    def setup_offline_fixture(
+        self,
+        fixture_path: str,
+        title: Optional[str] = None,
+        process_name: Optional[str] = None
+    ) -> None:
         """Sets up a mock game window and fixture image for offline operation."""
         img = cv2.imread(fixture_path)
         if img is None:
             raise ValueError(f"Could not load fixture from {fixture_path}")
         h, w = img.shape[:2]
+        if not self.simulation_session:
+            # This method can also be called on an existing context. Switch all
+            # knowledge owners, not just the capture/input path.
+            simulation_storage = self._open_knowledge_storage(simulation=True)
+            self.storage.db.close()
+            self.storage = simulation_storage
+            self.state_recognizer.storage = simulation_storage
+            self.skill_engine.storage = simulation_storage
+            self.skill_learner.storage = simulation_storage
+            self.explorer.storage = simulation_storage
+            self.navigation_graphs.clear()
+            self.navigators.clear()
+            self.simulation_session = True
+            self._init_default_game_metadata()
         mock_win = WindowInfo(
             hwnd=9999,
-            title="Hearts of Iron IV (Mock Fixture)",
-            process_name="hoi4.exe",
+            title=title or "Hearts of Iron IV (Mock Fixture)",
+            process_name=process_name or "hoi4.exe",
             pid=1234,
             x=0,
             y=0,
@@ -352,15 +417,85 @@ class UGMContext:
         self.window_manager.set_mock_window(mock_win)
         fixture_backend = FixtureBackend(img)
         self.capture_manager.set_backend(fixture_backend)
+        with self._baseline_lock:
+            self.pre_capture_cache.clear()
+        self.input_controller.enforce_dry_run = True
+        self._offline_fixture_configured = True
         logger.info("UGM configured in offline fixture mode using %s (%dx%d)", fixture_path, w, h)
+
+    def _prune_expired_baselines(self, now: float) -> None:
+        # Caller holds _baseline_lock.
+        for capture_id, baseline in tuple(self.pre_capture_cache.items()):
+            if not baseline.is_fresh(now):
+                del self.pre_capture_cache[capture_id]
+
+    def store_baseline(
+        self, capture_id: str, frame: np.ndarray, scope: ObservationScope,
+    ) -> Optional[VerificationBaseline]:
+        with self._baseline_lock:
+            now = _baseline_clock()
+            self._prune_expired_baselines(now)
+            if frame.nbytes > BASELINE_MAX_BYTES:
+                return None
+            used = sum(b.frame.nbytes for b in self.pre_capture_cache.values())
+            while (len(self.pre_capture_cache) >= BASELINE_MAX_COUNT
+                   or used + frame.nbytes > BASELINE_MAX_BYTES):
+                oldest = next(iter(self.pre_capture_cache))
+                used -= self.pre_capture_cache.pop(oldest).frame.nbytes
+            baseline = VerificationBaseline(frame.copy(), scope, now)
+            self.pre_capture_cache[capture_id] = baseline
+            return baseline
+
+    def get_baseline(self, capture_id: str) -> Optional[VerificationBaseline]:
+        with self._baseline_lock:
+            self._prune_expired_baselines(_baseline_clock())
+            return self.pre_capture_cache.get(capture_id)
+
+    def capture_observation(self) -> np.ndarray:
+        """Acquire a game-client frame for ordinary MCP capture and OCR."""
+        return self._capture_observation_for_window(self.window_manager.current_window)
+
+    def _capture_observation_for_window(self, window: Optional[WindowInfo]) -> np.ndarray:
+        if self._offline_fixture_configured:
+            if not isinstance(self.capture_manager.backend, FixtureBackend):
+                raise SafetyViolationError("Offline observation requires the configured fixture capture backend.")
+            return self.capture_manager.capture(window=window)
+        # --dry-run limits hardware input, not the scope of real observation.
+        return self.capture_manager.capture_attached_window(self.window_manager, window)
+
+    def _observation_scope(self, window: Optional[WindowInfo]) -> ObservationScope:
+        return ObservationScope(
+            self.window_manager.attachment_revision,
+            window_binding(window) if window is not None else None,
+            self.simulation_session,
+            self._offline_fixture_configured,
+            self.capture_manager.backend_revision,
+        )
+
+    def capture_verification_frame(
+        self, baseline: Optional[VerificationBaseline] = None,
+    ) -> tuple[np.ndarray, ObservationScope]:
+        current = self.window_manager.current_window
+        window = replace(current) if current is not None else None
+        scope = self._observation_scope(window)
+        if baseline is not None and (baseline.scope != scope or not baseline.is_fresh()):
+            raise InvalidVerificationBaseline()
+        frame = self._capture_observation_for_window(window)
+        if scope != self._observation_scope(self.window_manager.current_window):
+            if baseline is not None:
+                raise InvalidVerificationBaseline()
+            raise SafetyViolationError("Observation target or backend changed during capture; retry capture.")
+        if baseline is not None and not baseline.is_fresh():
+            raise InvalidVerificationBaseline()
+        return frame, scope
 
 
 def create_server(context: Optional[UGMContext] = None) -> MCPServer:
-    """Creates and configures the MCP server with the 10 standard UGM tools."""
+    """Creates and configures the MCP server with the UGM tools."""
     ctx = context or UGMContext()
     server = MCPServer(
         name="universal-game-mcp",
-        version="1.5.0",
+        version=__version__,
         instructions="Universal Game MCP (UGM) allows AI agents to observe, read text, locate icons, interact safely, navigate menus, execute game skills, and learn verified procedural knowledge across game sessions."
     )
 
@@ -393,11 +528,19 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         save_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Captures the current screen of the active game window.
+        Captures the attached, focused game client or explicitly configured fixture.
         Optional 'roi' parameter specifies [x, y, width, height] normalized coordinates (0.0 to 1.0).
+        Use the capture ID for same-scope visual verification within 60 seconds if retained.
+        Older frames can be evicted earlier to meet the verification cache budget.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window, roi=norm_roi)
+        full_frame, scope = ctx.capture_verification_frame()
+        cap_id = f"cap_{uuid4().hex}"
+        baseline = ctx.store_baseline(cap_id, full_frame, scope)
+        frame = baseline.frame if baseline is not None else full_frame
+        if norm_roi is not None:
+            box = norm_roi.to_pixel(frame.shape[1], frame.shape[0])
+            frame = frame[box.y:box.bottom, box.x:box.right]
 
         h, w = frame.shape[:2]
         saved_file = None
@@ -405,16 +548,9 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             saved_file = ctx.capture_manager.save_image(frame, save_path)
 
         preview_b64 = ctx.capture_manager.encode_base64_png(frame)
-        cap_id = f"cap_{int(time.time() * 1000)}"
-        ctx.pre_capture_cache[cap_id] = frame
-
-        # Keep cache bounded
-        if len(ctx.pre_capture_cache) > 10:
-            oldest = next(iter(ctx.pre_capture_cache))
-            del ctx.pre_capture_cache[oldest]
-
         return {
             "capture_id": cap_id,
+            "verification_baseline_available": baseline is not None,
             "width": w,
             "height": h,
             "latency_ms": round(ctx.capture_manager.last_latency_ms, 2),
@@ -429,11 +565,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         event_tag: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Performs event-driven OCR on the game screen or ROI using RapidOCR (PP-OCRv4/v6 CPU).
+        Performs OCR on the attached, focused game client or explicitly configured fixture.
         Returns bounding boxes normalized relative to the game window and detected text items.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        frame = ctx.capture_observation()
         ocr_res = ctx.ocr_engine.read_text(frame, roi=norm_roi, event_tag=event_tag)
         return ocr_res.to_dict()
 
@@ -585,7 +721,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ) -> Dict[str, Any]:
         """
         Safely clicks at normalized coordinates (x, y) or dynamically resolves target selector/query.
-        Always verifies visual state change; never reports success solely because a mouse click was dispatched.
+        When enabled, verification checks live visual state change. Dry-run has no verified outcome.
         """
         norm_ver_roi = NormalizedRect(
             verification_roi[0], verification_roi[1], verification_roi[2], verification_roi[3]
@@ -671,23 +807,29 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         min_diff_ratio: float = 0.005
     ) -> Dict[str, Any]:
         """
-        Verifies visual game state comparing against pre_capture_id or baseline frame.
-        Optionally validates that expected_text appears in the target ROI.
+        Without a baseline, checks that expected_text appears in the current frame or ROI.
+        With pre_capture_id, checks frame change and any requested text in full-window coordinates.
+        Baselines expire after 60 seconds or when attachment or capture scope changes.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        def invalid_baseline() -> Dict[str, Any]:
+            return {
+                "verified": False,
+                "diff_ratio": 0.0,
+                "message": "Verification failed: pre_capture_id was not found in cache, has expired, or belongs to a different observation scope. Capture a new baseline.",
+                "latency_ms": 0.0,
+                "details": {"error": "invalid_pre_capture_id"},
+            }
 
-        pre_frame = None
         if pre_capture_id is not None:
-            if pre_capture_id not in ctx.pre_capture_cache:
-                return {
-                    "verified": False,
-                    "diff_ratio": 0.0,
-                    "message": f"Verification failed: pre_capture_id '{pre_capture_id}' was not found in cache or has expired.",
-                    "latency_ms": 0.0,
-                    "details": {"error": "invalid_pre_capture_id"}
-                }
-            pre_frame = ctx.pre_capture_cache[pre_capture_id]
+            baseline = ctx.get_baseline(pre_capture_id)
+            if baseline is None or not baseline.is_fresh():
+                return invalid_baseline()
+            try:
+                post_frame, scope = ctx.capture_verification_frame(baseline)
+            except InvalidVerificationBaseline:
+                return invalid_baseline()
+            pre_frame = baseline.frame
         else:
             if expected_text is None and min_diff_ratio > 0.0:
                 return {
@@ -697,7 +839,10 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                     "latency_ms": 0.0,
                     "details": {"error": "missing_baseline"}
                 }
+            post_frame, scope = ctx.capture_verification_frame()
             pre_frame = post_frame
+            if expected_text is not None:
+                min_diff_ratio = 0.0
 
         ver_res = ctx.verifier.verify_selection(
             pre_frame=pre_frame,
@@ -706,7 +851,12 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             expected_text=expected_text,
             min_diff_ratio=min_diff_ratio
         )
-        return ver_res.to_dict()
+        result = ver_res.to_dict()
+        result["evidence_level"] = (
+            "simulated" if scope.simulation else
+            "verified" if ver_res.verified and (expected_text or min_diff_ratio > 0.0) else "observed"
+        )
+        return result
 
     # 8b. verify_selection (Backward compatible adapter)
     @server.tool()
@@ -805,11 +955,26 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ) -> Dict[str, Any]:
         """
         Classifies and reports the current game interface state (e.g. main_map, production, research, paused).
+        Native frames require a focused attachment; an explicit game ID must match the attached game.
         Returns confidence, supporting observable evidence, perceptual hash, and whether state is known/ambiguous/unknown.
         """
-        target_game_id = game_id or ctx.active_game_id or "hoi4"
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-        det = ctx.state_recognizer.recognize_state(frame, game_id=target_game_id, hint_state=hint_state)
+        if ctx._offline_fixture_configured:
+            target_game_id = game_id or ctx.active_game_id or "hoi4"
+            frame = ctx.capture_observation()
+        else:
+            attached_window = ctx.window_manager.current_window
+            if attached_window is None:
+                raise SafetyViolationError("No target game window attached. Attach a game before classifying its UI.")
+            window = replace(attached_window)
+            target_game_id = game_id_for_window(window)
+            if game_id is not None and game_id != target_game_id:
+                raise SafetyViolationError("Requested game_id does not match the attached game.")
+            frame = ctx.capture_manager.capture_attached_window(ctx.window_manager, window)
+        det = ctx.state_recognizer.recognize_state(
+            frame, game_id=target_game_id, hint_state=hint_state,
+            simulation=ctx.simulation_session,
+            record_observation=not ctx.input_controller.is_dry_run_active() or ctx.simulation_session,
+        )
         return det.to_dict()
 
     # 13. memory_search
@@ -860,7 +1025,10 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         target_game_id = game_id or ctx.active_game_id or "hoi4"
         if not start_state:
             frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-            det = ctx.state_recognizer.recognize_state(frame, game_id=target_game_id)
+            det = ctx.state_recognizer.recognize_state(
+                frame, game_id=target_game_id, simulation=ctx.simulation_session,
+                record_observation=not ctx.input_controller.is_dry_run_active() or ctx.simulation_session,
+            )
             start_state = det.state_name
 
         graph = ctx.get_navigation_graph(target_game_id)
@@ -869,7 +1037,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             "found": plan.found,
             "start_state": plan.start_state,
             "target_state": plan.target_state,
-            "total_cost": plan.total_cost,
+            "total_cost": plan.total_cost if plan.found else None,
             "steps_count": len(plan.edges),
             "nodes_path": plan.nodes,
             "steps": [asdict(e) for e in plan.edges],
@@ -909,7 +1077,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         Executes a registered curated or verified learned Game Skill.
         Validates preconditions, dispatches sequential allowlisted primitives, verifies postconditions.
-        Never reports success unless postcondition verification passed.
+        Dry-run success only means the steps were accepted, not executed or verified.
+        An actual postcondition match is indicated by post_verification_passed.
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
         res = ctx.skill_engine.execute_skill(
@@ -950,13 +1119,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 post_verification=post_verification,
                 source=source
             )
-            if initial_confidence is not None:
-                ctx.storage.update_knowledge_state(
-                    game_id=target_game_id,
-                    item_type="skill",
-                    item_id=skill_id,
-                    new_status="candidate"
-                )
+            # initial_confidence is accepted for legacy clients; a caller hint
+            # cannot rewrite a stored skill's lifecycle or serve as validation.
             res["success"] = True
             return res
         except Exception as e:
@@ -1002,14 +1166,16 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ) -> Dict[str, Any]:
         """
         Safely deletes learned experience from persistent storage.
-        Can delete an individual skill by skill_id, or scoped by game_id and scope ('all', 'history', 'skills', 'transitions', 'states').
+        Pass game_id when deleting an individual skill_id shared by multiple games.
+        Otherwise delete by game_id and scope ('all', 'history', 'skills', 'transitions', 'states').
         """
         if skill_id:
-            deleted = ctx.skill_learner.delete_skill(skill_id)
+            deleted = ctx.skill_learner.delete_skill(skill_id, game_id=game_id)
+            not_found = "not found" if game_id is not None else "not found or ambiguous; pass game_id if shared"
             return {
                 "deleted": deleted,
                 "skill_id": skill_id,
-                "message": f"Skill '{skill_id}' deleted." if deleted else f"Skill '{skill_id}' not found."
+                "message": f"Skill '{skill_id}' deleted." if deleted else f"Skill '{skill_id}' {not_found}."
             }
         else:
             target_game_id = game_id or ctx.active_game_id
@@ -1058,7 +1224,9 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Scans current game screen (or ROI) for candidate interactive UI affordances:
         buttons, text anchors, tabs, and layout regions.
         """
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
+        if roi is not None and len(roi) != 4:
+            raise ValueError("Exploration ROI must contain [x, y, width, height].")
+        norm_roi = NormalizedRect(*roi) if roi is not None else None
         frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
         candidates = ctx.explorer.discover_interactive_elements(frame, roi=norm_roi, scan_mode=scan_mode)
         return {
@@ -1075,21 +1243,28 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         expected_roi: Optional[List[float]] = None,
         dry_run: bool = False,
         revert_on_fail: bool = False,
-        game_id: Optional[str] = None
+        game_id: Optional[str] = None,
+        timeout_s: Annotated[float, Field(ge=PROBE_TIMEOUT_MIN_S, le=PROBE_TIMEOUT_MAX_S)] = 5.0,
     ) -> Dict[str, Any]:
         """
         Executes a bounded Observe-Act-Verify probe step.
-        Dispatches action, measures visual/textual change, checks state transition,
-        and returns empirical verification evidence with optional automatic safe retreat.
+        Live probes sample for stable change within timeout_s, not proof of a gameplay rule.
+        The timeout is cooperative: native capture/input/OCR already in progress may overrun.
+        Click and hover require explicit normalized x and y coordinates.
+        Dry-run validates the requested action without dispatch or empirical verification.
+        revert_on_fail is retained for compatibility; no generic undo is dispatched.
         """
-        norm_roi = NormalizedRect(expected_roi[0], expected_roi[1], expected_roi[2], expected_roi[3]) if expected_roi and len(expected_roi) == 4 else None
+        if expected_roi is not None and len(expected_roi) != 4:
+            raise ValueError("expected_roi must contain [x, y, width, height].")
+        norm_roi = NormalizedRect(*expected_roi) if expected_roi is not None else None
         return ctx.explorer.probe_step(
             action=action,
             params=params,
             expected_roi=norm_roi,
+            timeout_s=timeout_s,
             dry_run=dry_run,
             revert_on_fail=revert_on_fail,
-            game_id=game_id or ctx.active_game_id
+            game_id=game_id
         )
 
     # 25. manage_knowledge_state
@@ -1099,20 +1274,29 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         item_id: str,
         status: str,
         game_id: Optional[str] = None,
-        reason: str = ""
+        reason: str = "",
+        transition_identity: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Updates knowledge lifecycle state (candidate, verified, suspect, rejected)
-        for a learned skill, transition, or selector.
+        for a learned skill, transition, or selector. Reject a curated transition with no
+        row by providing transition_identity {from_state, to_state, action_type, params}
+        and an empty item_id. Quarantined routes stay blocked across checkpoint rollback.
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
-        updated = ctx.storage.update_knowledge_state(
-            game_id=target_game_id,
-            item_type=item_type,
-            item_id=item_id,
-            new_status=status,
-            reason=reason
-        )
+        if transition_identity is not None:
+            fields = {"from_state", "to_state", "action_type", "params"}
+            if item_type != "transition" or status != "rejected" or item_id or set(transition_identity) != fields:
+                raise ValueError("transition_identity requires transition rejection, empty item_id and an exact edge.")
+            updated = ctx.storage.quarantine_route(target_game_id, **transition_identity, reason=reason)
+        else:
+            updated = ctx.storage.update_knowledge_state(
+                game_id=target_game_id,
+                item_type=item_type,
+                item_id=item_id,
+                new_status=status,
+                reason=reason,
+            )
         return {
             "success": updated,
             "game_id": target_game_id,
@@ -1149,13 +1333,16 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         game_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Atomically restores game knowledge to a previously saved checkpoint.
+        Atomically restores game knowledge from a supported checkpoint. Rejected routes
+        stay quarantined. Legacy/lossy or invalid checkpoints are not applied.
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
         success = ctx.storage.rollback_checkpoint(game_id=target_game_id, checkpoint_id=checkpoint_id)
-        # Reload navigation graph if active
-        if success and target_game_id in ctx.navigation_graphs:
-            ctx.navigation_graphs[target_game_id] = NavigationGraph(game_id=target_game_id, storage=ctx.storage)
+        if success:
+            # The navigator holds a reference to its graph. Recreate both lazily
+            # through the normal loader, which also restores built-in routes.
+            ctx.navigators.pop(target_game_id, None)
+            ctx.navigation_graphs.pop(target_game_id, None)
         return {
             "success": success,
             "game_id": target_game_id,
@@ -1227,27 +1414,50 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     @server.tool()
     def optimize_skill(
         skill_id: str,
-        steps: List[Dict[str, Any]],
+        steps: Optional[List[Dict[str, Any]]] = None,
         rationale: str = "",
-        game_id: Optional[str] = None
+        game_id: Optional[str] = None,
+        operation: str = "propose",
+        candidate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Optimizes a learned Game Skill by refining its step sequence, logging rationale,
-        and bumping its version number while preserving execution track records.
+        Propose a separate skill revision. This never replaces the active skill.
+        Use inspect or promote with an explicit game_id and candidate_id. Promotion
+        requires internal paired live benchmarks; callers cannot submit trial claims.
         """
         try:
-            success = ctx.skill_learner.optimize_skill(skill_id=skill_id, new_steps=steps, rationale=rationale)
-            return {
-                "success": success,
-                "skill_id": skill_id,
-                "message": f"Skill '{skill_id}' {'optimized successfully' if success else 'not found'}."
-            }
+            if operation == "propose":
+                if candidate_id is not None:
+                    raise ValueError("A new proposal cannot specify an existing candidate_id.")
+                candidate = ctx.skill_learner.stage_optimization(
+                    skill_id=skill_id, new_steps=steps or [], rationale=rationale, game_id=game_id,
+                )
+                if candidate is None:
+                    return {"success": False, "promoted": False, "skill_id": skill_id,
+                            "message": f"No candidate for '{skill_id}': missing, ambiguous, rejected, or identical steps."}
+                return {"success": True, "promoted": False, "skill_id": skill_id,
+                        "candidate": asdict(candidate),
+                        "message": "Candidate staged; the active skill is unchanged."}
+
+            if operation not in {"inspect", "promote"}:
+                raise ValueError("operation must be propose, inspect, or promote.")
+            if not game_id or not candidate_id or steps is not None:
+                raise ValueError("Inspect/promote needs an explicit game_id and candidate_id, without steps.")
+
+            if operation == "inspect":
+                candidate = ctx.storage.get_skill_optimization_candidate(game_id, skill_id, candidate_id)
+                return {
+                    "success": candidate is not None,
+                    "skill_id": skill_id,
+                    "candidate": asdict(candidate) if candidate else None,
+                    "message": "Candidate loaded." if candidate else "Candidate not found.",
+                }
+
+            decision = ctx.storage.promote_skill_optimization(game_id, skill_id, candidate_id)
+            return {**decision, "skill_id": skill_id}
         except (SafetyViolationError, ValueError) as e:
-            return {
-                "success": False,
-                "skill_id": skill_id,
-                "message": f"Optimization rejected: {e}"
-            }
+            return {"success": False, "promoted": False, "skill_id": skill_id,
+                    "message": f"Optimization rejected: {e}"}
 
     # 31. prune_temporary_data
     @server.tool()
@@ -1276,12 +1486,15 @@ def main():
     parser = argparse.ArgumentParser(description="Universal Game MCP Server (UGM)")
     parser.add_argument("--fixture", type=str, default=None, help="Path to offline fixture image for testing")
     parser.add_argument("--dry-run", action="store_true", help="Enforce dry-run mode for all input actions")
+    parser.add_argument("--db-path", type=Path, help="SQLite knowledge database path (simulation sessions use a separate .simulation file)")
+    parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args()
+    if args.fixture is not None and not Path(args.fixture).is_file():
+        parser.error("the fixture must be an existing image file")
 
-    ctx = UGMContext(offline_fixture=args.fixture)
-    if args.dry_run:
-        safety_manager.set_dry_run_enforced(True)
-        ctx.input_controller.dry_run_default = True
+    ctx = UGMContext(
+        offline_fixture=args.fixture, db_path=args.db_path, enforce_dry_run=args.dry_run,
+    )
 
     server = create_server(ctx)
     logger.info("Starting Universal Game MCP (UGM) server via stdio transport...")
