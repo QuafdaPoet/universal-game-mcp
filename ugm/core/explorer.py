@@ -8,14 +8,16 @@ from __future__ import annotations
 import time
 import uuid
 import logging
+import math
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 import numpy as np
 import cv2
 
-from .types import NormalizedRect, BoundingBox, VerificationResult
+from .types import NormalizedRect, BoundingBox
 from .safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
 from .capture import CaptureManager
+from .window import game_id_for_window
 from .input import InputController
 from .verifier import ActionVerifier
 from .ocr import BaseOCREngine
@@ -25,6 +27,28 @@ if TYPE_CHECKING:
     from ..memory.storage import PersistentKnowledgeStorage
 
 logger = logging.getLogger("ugm.core.explorer")
+
+PROBE_TIMEOUT_MIN_S = 0.05
+PROBE_TIMEOUT_MAX_S = 10.0
+_PROBE_POLL_S = 0.05
+_PROBE_STABLE_S = 0.10
+_PROBE_CHANGE_RATIO = 0.005
+_PROBE_STABILITY_RATIO = 0.002
+_PROBE_OCR_MIN_BUDGET_S = 0.05
+
+
+class _ProbeTimeout(Exception):
+    def __init__(self, phase: str):
+        self.phase = phase
+
+
+@dataclass
+class _ProbeObservation:
+    outcome: str
+    diff_ratio: float = 0.0
+    stable_frame: Optional[np.ndarray] = None
+    transient_change: bool = False
+    diff_measured: bool = False
 
 
 @dataclass
@@ -105,10 +129,19 @@ class UIExplorer:
         if h == 0 or w == 0:
             return candidates
 
-        crop_x = int(roi.x * w) if roi else 0
-        crop_y = int(roi.y * h) if roi else 0
-        crop_w = int(roi.width * w) if roi else w
-        crop_h = int(roi.height * h) if roi else h
+        if roi is not None:
+            if not (0 <= roi.x < roi.x + roi.width <= 1 and 0 <= roi.y < roi.y + roi.height <= 1):
+                raise ValueError("Exploration ROI must fit inside the frame and have positive width and height.")
+            bounds = roi.to_pixel(w, h)
+            crop_x, crop_y, crop_w, crop_h = bounds.x, bounds.y, bounds.width, bounds.height
+        else:
+            crop_x, crop_y, crop_w, crop_h = 0, 0, w, h
+
+        crop = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
+        # Some OpenCV inputs make a bright, empty ROI look like one large
+        # rectangle. No contrast means there is nothing to ground a proposal.
+        if not crop.size or not np.any(crop != crop[0, 0]):
+            return candidates
 
         # ----------------------------------------------------
         # 1. OCR-driven text element discovery
@@ -146,7 +179,6 @@ class UIExplorer:
         # ----------------------------------------------------
         if scan_mode in ("all", "shapes", "buttons"):
             try:
-                crop = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
                 if hasattr(cv2, "cvtColor") and hasattr(cv2, "threshold") and hasattr(cv2, "findContours"):
                     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
                     _, thresh = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY)
@@ -162,6 +194,8 @@ class UIExplorer:
                             bx, by, bw, bh = cnt
                         else:
                             bx, by, bw, bh = cv2.boundingRect(cnt)
+                        if bw == crop_w and bh == crop_h:
+                            continue
                         # Filter by realistic button dimensions (width 40-400px, height 15-80px)
                         if 40 <= bw <= 400 and 15 <= bh <= 80:
                             abs_x = crop_x + bx
@@ -194,20 +228,174 @@ class UIExplorer:
             except Exception as e:
                 logger.debug("Explorer shape scan notice: %s", e)
 
-        # Fallback anchor if no candidates detected (ensures exploration baseline)
-        if not candidates and scan_mode in ("all", "buttons", "shapes"):
-            candidates.append(UIElementCandidate(
-                candidate_id="elem_anchor_center",
-                element_type="button",
-                bbox=NormalizedRect(x=0.4, y=0.45, width=0.2, height=0.1),
-                center=(0.5, 0.5),
-                text=None,
-                suggested_action="click_target",
-                confidence=0.5,
-                details={"source": "fallback_center_anchor"}
-            ))
-
         return candidates
+
+    @staticmethod
+    def _probe_number(value: Any, minimum: float, maximum: float, name: str) -> float:
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SafetyViolationError(f"Probe {name} must be a finite number.") from exc
+        if not math.isfinite(number) or not minimum <= number <= maximum:
+            raise SafetyViolationError(f"Probe {name} must be between {minimum} and {maximum}.")
+        return number
+
+    def _prepare_probe(self, action: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
+        """Validates parameters and estimates minimum practical dispatch budget."""
+        if action in ("press_keys", "press_key"):
+            keys = params.get("keys") or ([params["key"]] if "key" in params else [])
+            if not isinstance(keys, list) or not 1 <= len(keys) <= 6 or any(
+                not isinstance(key, str) or len(key) > 64 for key in keys
+            ):
+                raise SafetyViolationError("Probe requires 1 to 6 explicit key tokens.")
+            groups = self.input_controller.normalize_and_validate_keys(keys)
+            if not groups or any(not 1 <= len(group) <= 4 for group in groups):
+                raise SafetyViolationError("Probe key combinations may contain at most four keys.")
+            duration = int(self._probe_number(params.get("duration_ms", 50), 0, 2_000, "duration_ms"))
+            estimated = sum(max(0.02, duration / 1_000) + 0.02 + 0.01 * (len(group) - 1) for group in groups)
+            return {"keys": keys, "duration_ms": duration}, estimated
+
+        if action in ("click_target", "click", "hover", "hover_target"):
+            if "x" not in params or "y" not in params:
+                raise SafetyViolationError("Probe click/hover requires explicit normalized x and y coordinates.")
+            coords = {
+                "norm_x": self._probe_number(params["x"], 0.0, 1.0, "x"),
+                "norm_y": self._probe_number(params["y"], 0.0, 1.0, "y"),
+            }
+            if action in ("click_target", "click"):
+                button = params.get("button", "left")
+                if button not in ("left", "right", "middle"):
+                    raise SafetyViolationError("Probe click button must be left, right, or middle.")
+                clicks = self._probe_number(params.get("clicks", 1), 1, 5, "clicks")
+                if not clicks.is_integer():
+                    raise SafetyViolationError("Probe clicks must be an integer.")
+                return {**coords, "button": button, "clicks": int(clicks)}, 0.05 * (1 + clicks)
+            duration = int(self._probe_number(params.get("duration_ms", 400), 0, 2_000, "duration_ms"))
+            return {**coords, "duration_ms": duration}, max(0.01, duration / 1_000)
+
+        if action == "wait":
+            duration_s = self._probe_number(params.get("duration_s", 0.2), 0.05, 2.0, "duration_s")
+            return {"duration_s": duration_s}, duration_s
+
+        raise ValueError(f"Disallowed probe action: '{action}'. Allowed: press_keys, press_key, click_target, click, hover, wait")
+
+    @staticmethod
+    def _check_probe_deadline(deadline: float, phase: str, required_s: float = 0.0) -> None:
+        if deadline - time.perf_counter() <= required_s:
+            raise _ProbeTimeout(phase)
+
+    def _require_probe_dispatch_target(self, win: Any) -> None:
+        self.capture_manager.require_attached_window(self.input_controller.window_manager, win)
+
+    def _capture_probe_frame(self, win: Any) -> np.ndarray:
+        frame = self.capture_manager.capture_attached_window(self.input_controller.window_manager, win)
+        if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3 or not frame.size:
+            raise SafetyViolationError("Probe capture returned no usable BGR frame.")
+        # A backend may reuse its capture buffer. Keep independent snapshots.
+        return frame.copy()
+
+    def _dispatch_probe(self, action: str, kwargs: Dict[str, Any], dry_run: bool, win: Any) -> Tuple[bool, Optional[str]]:
+        bound = {"target_window": win} if win is not None and not dry_run else {}
+        if action in ("press_keys", "press_key"):
+            result = self.input_controller.press_keys(**kwargs, dry_run=dry_run, **bound)
+            if getattr(result, "dry_run", False) and not dry_run:
+                return False, "Input entered dry-run before dispatch."
+            return result.success, None if result.success else result.message
+        if action in ("click_target", "click"):
+            result = self.input_controller.click(**kwargs, dry_run=dry_run, **bound)
+            accepted = result.executed or (dry_run and result.dry_run and result.status == "success")
+            return accepted, None if accepted else result.reason
+        if action in ("hover", "hover_target"):
+            _, _, executed = self.input_controller.hover(**kwargs, dry_run=dry_run, **bound)
+            return executed or dry_run, None if executed or dry_run else "Hover failed"
+        if not dry_run:
+            time.sleep(kwargs["duration_s"])
+        return True, None
+
+    def _observe_probe(
+        self, win: Any, baseline: np.ndarray, roi: Optional[NormalizedRect], deadline: float,
+    ) -> _ProbeObservation:
+        """Wait for a stable change, or observe an unchanged tail through the deadline."""
+        candidate = None
+        candidate_since = 0.0
+        unchanged_anchor = None
+        unchanged_since = None
+        last_sample_time = None
+        last_delta = 0.0
+        saw_change = False
+
+        while (remaining := deadline - time.perf_counter()) > 0:
+            time.sleep(min(_PROBE_POLL_S, remaining))
+            if time.perf_counter() >= deadline:
+                break
+            safety_manager.check_safety()
+            frame = self._capture_probe_frame(win)
+            self._check_probe_deadline(deadline, "observation")
+            if frame.shape != baseline.shape:
+                raise SafetyViolationError("Probe frame dimensions changed; no comparable post-action observation.")
+            delta = self.verifier.verify_selection(
+                pre_frame=baseline, post_frame=frame, roi=roi, min_diff_ratio=_PROBE_CHANGE_RATIO,
+            ).diff_ratio
+            self._check_probe_deadline(deadline, "observation")
+            last_sample_time = time.perf_counter()
+            last_delta = delta
+
+            if delta >= _PROBE_CHANGE_RATIO:
+                saw_change = True
+                unchanged_anchor = unchanged_since = None
+                if candidate is not None:
+                    drift = self.verifier.verify_selection(
+                        pre_frame=candidate, post_frame=frame, roi=roi, min_diff_ratio=_PROBE_STABILITY_RATIO,
+                    ).diff_ratio
+                    self._check_probe_deadline(deadline, "observation")
+                    if drift < _PROBE_STABILITY_RATIO:
+                        if last_sample_time - candidate_since + 1e-9 >= _PROBE_STABLE_S:
+                            outcome = "major_state_transition" if delta >= 0.08 else "localized_ui_update"
+                            return _ProbeObservation(outcome, delta, frame, diff_measured=True)
+                        continue
+                candidate, candidate_since = frame, last_sample_time
+            else:
+                candidate = None
+                if unchanged_anchor is not None:
+                    drift = self.verifier.verify_selection(
+                        pre_frame=unchanged_anchor, post_frame=frame, roi=roi, min_diff_ratio=_PROBE_STABILITY_RATIO,
+                    ).diff_ratio
+                    self._check_probe_deadline(deadline, "observation")
+                    if drift < _PROBE_STABILITY_RATIO:
+                        continue
+                unchanged_anchor, unchanged_since = frame, last_sample_time
+
+        if (
+            unchanged_since is not None and last_sample_time is not None
+            and last_sample_time - unchanged_since + 1e-9 >= _PROBE_STABLE_S
+        ):
+            return _ProbeObservation(
+                "no_visual_change", last_delta, transient_change=saw_change, diff_measured=True,
+            )
+        return _ProbeObservation("timeout", transient_change=saw_change)
+
+    def _extract_probe_text(
+        self, baseline: np.ndarray, post: np.ndarray, roi: Optional[NormalizedRect], deadline: float,
+    ) -> List[str]:
+        self._check_probe_deadline(deadline, "ocr", required_s=_PROBE_OCR_MIN_BUDGET_S)
+        before = self.ocr_engine.read_text(baseline, roi=roi, event_tag="probe_baseline_check")
+        self._check_probe_deadline(deadline, "ocr", required_s=_PROBE_OCR_MIN_BUDGET_S)
+        after = self.ocr_engine.read_text(post, roi=roi, event_tag="probe_post_check")
+        self._check_probe_deadline(deadline, "ocr")
+
+        seen = {" ".join(item.text.split()).casefold() for item in before.items}
+        found = []
+        for item in after.items:
+            text = " ".join(item.text.split())
+            key = text.casefold()
+            if len(text) > 1 and key not in seen:
+                found.append(text)
+                seen.add(key)
+                if len(found) == 5:
+                    break
+        return found
 
     def probe_action(
         self,
@@ -219,158 +407,167 @@ class UIExplorer:
         revert_on_fail: bool = False,
         game_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Executes a bounded Observe-Act-Verify probe step.
-        Dispatches action, measures visual/textual delta, and classifies result.
-        """
+        """Runs one bounded probe. In-flight native calls cannot be forcibly interrupted."""
+        t0 = time.perf_counter()
         safety_manager.check_safety()
+        p = params or {}
+        act_norm = action.lower().strip()
+        timeout = self._probe_number(timeout_s, PROBE_TIMEOUT_MIN_S, PROBE_TIMEOUT_MAX_S, "timeout_s")
+        kwargs, estimated_dispatch_s = self._prepare_probe(act_norm, p)
+        if expected_roi is not None:
+            x, y, width, height = (
+                self._probe_number(getattr(expected_roi, field), 0.0, 1.0, f"expected_roi.{field}")
+                for field in ("x", "y", "width", "height")
+            )
+            if width <= 0 or height <= 0 or x + width > 1.0 + 1e-9 or y + height > 1.0 + 1e-9:
+                raise SafetyViolationError("Probe expected_roi must have nonzero area inside the window.")
+            expected_roi = NormalizedRect(x, y, width, height)
         if self.probe_count >= self.max_probe_depth:
             raise SafetyViolationError(
                 f"Exploration probe budget exceeded ({self.probe_count}/{self.max_probe_depth} steps). "
-                f"Review observations or reset probe budget before continuing."
+                "Review observations or reset probe budget before continuing."
             )
         self.probe_count += 1
+        step = self.probe_count
 
-        p = params or {}
-        t0 = time.perf_counter()
+        effective_dry_run = self.input_controller.is_dry_run_active(dry_run)
+        deadline = t0 + timeout
+        win = None
+        baseline = None
+        evidence_game_id = game_id or self.active_game_id or "generic"
+        dispatch_status = "not_attempted"
+        dispatch_error = None
+        observation_error = None
+        timeout_phase = None
+        new_text = []
+        ocr_status = "not_attempted"
+        observation = _ProbeObservation("blocked")
 
-        win = getattr(self.input_controller, "window_manager", None) and self.input_controller.window_manager.current_window
-
-        # Step 1: Capture baseline pre-action frame cropped to game client rect
-        pre_frame = self.capture_manager.capture(window=win)
-
-        # Step 2: Dispatch candidate action safely
-        executed = True
-        exec_error = None
-        act_norm = action.lower().strip()
+        phase = "baseline_capture" if not effective_dry_run else "dispatch"
         try:
-            if act_norm in ("press_keys", "press_key"):
-                keys = p.get("keys") or ([p["key"]] if "key" in p else [])
-                duration = p.get("duration_ms", 50)
-                res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
-                executed = res.get("executed", True) if isinstance(res, dict) else getattr(res, "executed", True)
-            elif act_norm in ("click_target", "click"):
-                x = float(p.get("x", 0.5))
-                y = float(p.get("y", 0.5))
-                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-                    raise SafetyViolationError(f"Normalized click coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
-                button = p.get("button", "left")
-                clicks = p.get("clicks", 1)
-                res = self.input_controller.click(norm_x=x, norm_y=y, button=button, clicks=clicks, dry_run=dry_run)
-                succ = getattr(res, "status", None) == "success" or getattr(res, "executed", False)
-                executed = True if (dry_run or succ) else False
-                if not executed:
-                    exec_error = getattr(res, "reason", "Click failed")
-            elif act_norm in ("hover", "hover_target"):
-                x = float(p.get("x", 0.5))
-                y = float(p.get("y", 0.5))
-                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-                    raise SafetyViolationError(f"Normalized hover coordinates ({x}, {y}) out of bounds [0.0, 1.0].")
-                duration = p.get("duration_ms", 400)
-                res = self.input_controller.hover(norm_x=x, norm_y=y, duration_ms=duration, dry_run=dry_run)
-                executed = res[2] if isinstance(res, tuple) and len(res) >= 3 else True
-            elif act_norm == "wait":
-                duration_s = min(2.0, max(0.05, float(p.get("duration_s", 0.2))))
-                if not dry_run:
-                    time.sleep(duration_s)
-                executed = True
+            if not effective_dry_run:
+                win = self.input_controller.window_manager.current_window
+                if win is not None:
+                    attached_id = game_id_for_window(win)
+                    if game_id is not None and game_id != attached_id:
+                        raise SafetyViolationError("Requested game_id does not match the attached probe target.")
+                    evidence_game_id = attached_id
+                    safety_manager.validate_process(win.process_name)
+                self._check_probe_deadline(deadline, phase)
+                baseline = self._capture_probe_frame(win)
+                self._check_probe_deadline(deadline, phase)
+                if expected_roi is not None:
+                    box = expected_roi.to_pixel(baseline.shape[1], baseline.shape[0])
+                    if box.x >= baseline.shape[1] or box.y >= baseline.shape[0]:
+                        raise SafetyViolationError("Probe expected_roi rounds to an empty pixel region.")
+                phase = "target_check"
+                self._require_probe_dispatch_target(win)
+                self._check_probe_deadline(deadline, phase)
+            phase = "dispatch"
+            # Do not start an input when there is insufficient time even for
+            # the expected dispatch and the minimum observation window.
+            required_s = 0.0 if effective_dry_run else estimated_dispatch_s + _PROBE_POLL_S + _PROBE_STABLE_S
+            self._check_probe_deadline(deadline, phase, required_s=required_s)
+            safety_manager.check_safety()
+            dispatch_status = "failed_or_partial"
+            accepted, dispatch_error = self._dispatch_probe(act_norm, kwargs, effective_dry_run, win)
+            if accepted:
+                dispatch_status = "simulation_accepted" if effective_dry_run else "completed"
+            self._check_probe_deadline(deadline, phase)
+
+            if not accepted:
+                observation = _ProbeObservation("execution_error")
+            elif effective_dry_run:
+                observation = _ProbeObservation("simulated")
             else:
-                raise ValueError(f"Disallowed probe action: '{action}'. Allowed: press_keys, press_key, click_target, click, hover, wait")
-        except (EmergencyStopTriggered, SafetyViolationError):
-            # Inviolable safety: propagate immediately, never swallow killswitch or violations
+                phase = "observation"
+                observation = self._observe_probe(win, baseline, expected_roi, deadline)
+                if observation.outcome == "timeout":
+                    timeout_phase = phase
+                if observation.stable_frame is not None:
+                    phase = "ocr"
+                    try:
+                        new_text = self._extract_probe_text(baseline, observation.stable_frame, expected_roi, deadline)
+                        ocr_status = "complete"
+                    except _ProbeTimeout:
+                        timeout_phase = phase
+                        ocr_status = "deadline"
+                    except (EmergencyStopTriggered, SafetyViolationError):
+                        raise
+                    except Exception:
+                        ocr_status = "error"
+                        logger.debug("Probe OCR comparison failed", exc_info=True)
+        except _ProbeTimeout as exc:
+            timeout_phase = exc.phase
+            observation = _ProbeObservation("timeout")
+        except EmergencyStopTriggered:
             raise
-        except Exception as e:
-            executed = False
-            exec_error = str(e)
-            logger.warning("Probe action '%s' execution error: %s", action, e)
-
-        # Step 3: Stabilization delay
-        if not dry_run:
-            time.sleep(0.08)
-
-        # Step 4: Capture post-action frame cropped to game client rect
-        post_frame = self.capture_manager.capture(window=win)
-
-        # Step 5: Diff & Verification Analysis
-        diff_res: VerificationResult = self.verifier.verify_selection(
-            pre_frame=pre_frame,
-            post_frame=post_frame,
-            roi=expected_roi,
-            min_diff_ratio=0.005
-        )
-
-        diff_ratio = diff_res.diff_ratio
-        visual_changed = diff_res.verified
-
-        if dry_run and executed and not exec_error:
-            # In dry-run mode, simulate affirmative visual response
-            diff_ratio = 0.025
-            visual_changed = True
+        except SafetyViolationError as exc:
+            if phase in ("dispatch", "ocr"):
+                raise
+            observation_error = str(exc)
+            observation = _ProbeObservation("observation_error" if phase == "observation" else "blocked")
+        except Exception as exc:
+            if phase in ("baseline_capture", "target_check", "observation"):
+                observation_error = str(exc)
+                observation = _ProbeObservation("observation_error" if phase == "observation" else "blocked")
+            else:
+                dispatch_error = str(exc)
+                observation = _ProbeObservation("execution_error")
+            logger.debug("Probe %s failed", phase, exc_info=True)
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Classify outcome
-        outcome = "no_visual_change"
-        if exec_error:
-            outcome = "execution_error"
-        elif diff_ratio >= 0.08:
-            outcome = "major_state_transition"
-        elif diff_ratio >= 0.005:
-            outcome = "localized_ui_update"
-
-        # Check for newly appeared text if diff detected
-        new_text_found = []
-        if visual_changed and not exec_error:
-            try:
-                post_ocr = self.ocr_engine.read_text(post_frame, roi=expected_roi, event_tag="probe_post_check")
-                new_text_found = [i.text for i in post_ocr.items[:5] if len(i.text) > 1]
-            except Exception:
-                pass
-
-        # Optional Revert on Failure (Safe Retreat)
-        reverted = False
-        if revert_on_fail and (not visual_changed or exec_error):
-            if not safety_manager.is_emergency_stopped:
-                try:
-                    self.input_controller.press_keys(keys=["escape"], duration_ms=50, dry_run=dry_run)
-                    reverted = True
-                except Exception:
-                    pass
-
-        # Record probe attempt into persistent action history
-        effective_gid = game_id or self.active_game_id or "generic"
-        if self.storage is not None:
+        visual_changed = observation.stable_frame is not None
+        diff_ratio = round(observation.diff_ratio, 4)
+        if self.storage is not None and (not effective_dry_run or self.storage.db.simulation) and observation.outcome != "blocked" and time.perf_counter() < deadline:
             try:
                 self.storage.record_action_history(
-                    game_id=effective_gid,
+                    game_id=evidence_game_id,
                     action_name=f"probe_{act_norm}",
                     params=p,
-                    success=(visual_changed and not exec_error),
-                    duration_ms=latency_ms
+                    success=visual_changed,
+                    source="synthetic_fixture" if effective_dry_run else "live",
+                    reason=observation.outcome,
+                    duration_ms=latency_ms,
                 )
-            except Exception as e:
-                logger.debug("Failed to record probe action history: %s", e)
+            except Exception as exc:
+                logger.debug("Failed to record probe action history: %s", exc)
 
+        evidence_level = "simulated" if effective_dry_run else "observed" if observation.diff_measured else "none"
         return {
             "action": action,
             "params": p,
-            "executed": executed,
+            "executed": dispatch_status == "completed",
+            "dispatch_status": dispatch_status,
+            "dry_run": effective_dry_run,
+            "simulation_accepted": observation.outcome == "simulated",
+            "evidence_level": evidence_level,
             "visual_change_detected": visual_changed,
-            "verification_passed": visual_changed,
-            "diff_ratio": round(diff_ratio, 4),
-            "outcome": outcome,
-            "execution_error": exec_error,
+            "verification_passed": visual_changed,  # Legacy visual check, not causal validation.
+            "diff_ratio": diff_ratio,
+            "visual_diff_measured": observation.diff_measured,
+            "outcome": observation.outcome,
+            "execution_error": dispatch_error,
+            "observation_error": observation_error,
+            "timeout_s": timeout,
+            "timed_out": timeout_phase is not None,
+            "timeout_phase": timeout_phase,
+            "transient_change_detected": observation.transient_change,
             "empirical_evidence": {
-                "diff_ratio": round(diff_ratio, 4),
+                "evidence_level": evidence_level,
+                "diff_ratio": diff_ratio,
+                "visual_diff_measured": observation.diff_measured,
                 "visual_changed": visual_changed,
-                "outcome": outcome,
-                "new_text": new_text_found
+                "outcome": observation.outcome,
+                "new_text": new_text,
+                "ocr_status": ocr_status,
             },
-            "new_text_detected": new_text_found,
+            "new_text_detected": new_text,
             "latency_ms": round(latency_ms, 2),
-            "reverted": reverted,
-            "probe_step": self.probe_count,
-            "message": f"Probe {action}: outcome={outcome}, diff_ratio={round(diff_ratio, 4)}"
+            "reverted": False,
+            "revert_status": "not_supported_without_verified_undo" if revert_on_fail else "not_requested",
+            "probe_step": step,
+            "message": f"Probe {action}: outcome={observation.outcome}, diff_ratio={diff_ratio}",
         }
 
     probe_step = probe_action

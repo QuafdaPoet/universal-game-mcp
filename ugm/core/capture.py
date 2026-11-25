@@ -11,12 +11,14 @@ import time
 import base64
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Optional, Tuple, Any
 import numpy as np
 import cv2
 
 from .types import WindowInfo, NormalizedRect, BoundingBox
-from .safety import SafetyViolationError
+from .safety import EmergencyStopTriggered, SafetyViolationError, safety_manager
+from .window import WindowManager, window_binding
 
 logger = logging.getLogger("ugm.capture")
 
@@ -85,11 +87,13 @@ class BetterCamBackend(BaseCaptureBackend):
 
         # If window is specified, crop to client rect
         if window is not None:
-            cx, cy = max(0, window.client_x), max(0, window.client_y)
+            cx, cy = window.client_x, window.client_y
             cw, ch = window.client_width, window.client_height
             h, w = frame.shape[:2]
-            cx2 = min(w, cx + cw)
-            cy2 = min(h, cy + ch)
+            cx2 = cx + cw
+            cy2 = cy + ch
+            if cx < 0 or cy < 0 or cx2 > w or cy2 > h:
+                raise RuntimeError("Window is not contained in the BetterCam capture output")
             frame = frame[cy:cy2, cx:cx2]
 
         # If ROI is specified, crop ROI
@@ -270,9 +274,12 @@ class CaptureManager:
         self,
         backend_override: Optional[BaseCaptureBackend] = None,
         allow_fixture_fallback: bool = True,
-        capture_dir: str = "data/captures"
+        capture_dir: str = "data/captures",
+        *,
+        require_window: bool = False,
     ):
         self.allow_fixture_fallback = allow_fixture_fallback
+        self.require_window = require_window
         self.capture_dir = os.path.abspath(capture_dir) if capture_dir else os.path.abspath(self.DEFAULT_CAPTURE_DIR)
         self._backend: BaseCaptureBackend
         if backend_override is not None:
@@ -356,22 +363,60 @@ class CaptureManager:
         Attempts viable live backends on failure before falling back to fixture.
         Caches the captured frame and timestamp.
         """
+        if self.require_window and window is None:
+            raise SafetyViolationError("No game window attached. Attach a game before requesting capture.")
         t0 = time.perf_counter()
-        while True:
-            try:
-                frame = self._backend.capture(window=window, roi=roi)
-                break
-            except Exception as exc:
-                logger.warning("Capture backend %s failed (%s). Attempting viable fallback.", type(self._backend).__name__, exc)
-                next_backend = self._try_next_viable_backend()
-                if next_backend is not None:
-                    self.set_backend(next_backend)
-                else:
-                    raise RuntimeError(f"All viable capture backends failed. Last error: {exc}") from exc
-
+        frame = self._capture_frame(window, roi)
         self._last_frame = frame
         self._last_capture_time = time.perf_counter() - t0
         return frame
+
+    def require_attached_window(self, window_manager: WindowManager, expected_window: Optional[WindowInfo]) -> WindowInfo:
+        """Confirm the expected focused client is still the attached native target."""
+        safety_manager.check_safety()
+        if expected_window is None:
+            raise SafetyViolationError("No target game window attached. Attach a game before requesting capture.")
+        current = window_manager.current_window
+        if (
+            not current or not current.hwnd or current.pid <= 0
+            or not current.process_name or current.process_name.casefold() == "unknown"
+            or not current.is_focused or current.is_minimized
+            or current.client_width <= 0 or current.client_height <= 0
+            or window_binding(current) != window_binding(expected_window)
+        ):
+            raise SafetyViolationError("Live observation target is missing, blurred, or changed.")
+        return current
+
+    def capture_attached_window(self, window_manager: WindowManager, expected_window: Optional[WindowInfo]) -> np.ndarray:
+        """Capture only the same focused client before and after a native grab."""
+        t0 = time.perf_counter()
+        window = replace(self.require_attached_window(window_manager, expected_window))
+        frame = self._capture_frame(window, None, require_live=True)
+        self.require_attached_window(window_manager, window)
+        if not isinstance(frame, np.ndarray) or frame.shape != (window.client_height, window.client_width, 3):
+            raise SafetyViolationError("Live observation frame does not match the attached target client.")
+        self._last_frame = frame
+        self._last_capture_time = time.perf_counter() - t0
+        return frame
+
+    def _capture_frame(self, window, roi, *, require_live: bool = False) -> np.ndarray:
+        while True:
+            backend = self._backend
+            if require_live and isinstance(backend, FixtureBackend):
+                raise SafetyViolationError("Live observation cannot use a fixture capture backend.")
+            try:
+                return backend.capture(window=window, roi=roi)
+            except (SafetyViolationError, EmergencyStopTriggered):
+                raise
+            except Exception as exc:
+                logger.warning("Capture backend %s failed (%s). Attempting viable fallback.", type(backend).__name__, exc)
+                next_backend = self._try_next_viable_backend()
+                if next_backend is None:
+                    raise RuntimeError(f"All viable capture backends failed. Last error: {exc}") from exc
+                if require_live and isinstance(next_backend, FixtureBackend):
+                    raise SafetyViolationError("Live observation cannot fall back to fixture data.") from exc
+                self.set_backend(next_backend)
+
 
     @property
     def last_frame(self) -> Optional[np.ndarray]:
