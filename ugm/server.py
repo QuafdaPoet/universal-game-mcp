@@ -11,6 +11,7 @@ import json
 import base64
 import time
 import logging
+import math
 from typing import Optional, List, Dict, Any, Annotated
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -566,9 +567,18 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ) -> Dict[str, Any]:
         """
         Performs OCR on the attached, focused game client or explicitly configured fixture.
-        Returns bounding boxes normalized relative to the game window and detected text items.
+        Returns bounding boxes normalized relative to the full game window.
+        Omit roi for full-frame OCR, or supply [x, y, width, height] within [0, 1].
         """
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
+        norm_roi = None
+        if roi is not None:
+            if len(roi) != 4 or not all(math.isfinite(value) for value in roi):
+                raise ValueError("OCR ROI must contain four finite [x, y, width, height] values.")
+            x, y, width, height = roi
+            if (not (0 <= x < 1 and 0 <= y < 1 and 0 < width <= 1 and 0 < height <= 1)
+                    or x + width > 1 + 1e-12 or y + height > 1 + 1e-12):
+                raise ValueError("OCR ROI must have positive size and lie within the normalized frame.")
+            norm_roi = NormalizedRect(*roi)
         frame = ctx.capture_observation()
         ocr_res = ctx.ocr_engine.read_text(frame, roi=norm_roi, event_tag=event_tag)
         return ocr_res.to_dict()

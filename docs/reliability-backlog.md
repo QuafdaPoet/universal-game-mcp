@@ -100,3 +100,33 @@ cumulative high-water marks, not isolated phase maxima. CI checks that the
 expected fixture text and normalized boxes agree across the 4K comparisons.
 That does not establish OCR equivalence on other games or languages. Orientation
 classifier construction and the separate dataset opt-out remain open work.
+
+### Bounded OCR calls
+
+Omit `read_text.roi` for full-frame OCR. A supplied region must have four
+finite normalized coordinates and positive size, and fit the frame. Invalid
+regions fail before capture instead of silently reading the whole frame.
+Results still use full-frame coordinates. The native screenshot itself remains
+a full client capture; cropping limits OCR inference, not screen capture.
+
+Compare the same simulator screenshot in fresh processes:
+
+```sh
+python -m scripts.benchmark_mcp_capture_memory --width 3840 --ocr-threads 2 --ocr-region full
+python -m scripts.benchmark_mcp_capture_memory --width 3840 --ocr-threads 2 --ocr-region gold
+```
+
+OCR reads the 900×550 fixture or a 153×82 padded crop. The later synthetic
+capture loop uses 3840×2160 frames; neither arm runs 4K OCR. Both require exactly
+one unambiguous `GOLD:500` item in the expected area of the original image and
+stable output within each arm. Do not require identical boxes across arms.
+A tighter 135×38 region split this label into overlapping detections in a local
+diagnostic, so region selection needs padding and verification rather than a
+fixed crop for unknown games.
+
+In three fresh two-thread Linux runs per arm, the median of the per-process
+repeated OCR medians was 417 ms full versus 250 ms cropped. Cumulative OS peak
+by the end of OCR was 461 MB full versus 471 MB cropped (decimal, medians).
+The crop was faster on this fixture but did not lower peak memory. Use bounded
+reads for known regions without assuming they meet the 250 MB budget or replace
+full-frame discovery. These measurements cover a simulator image, not a game.

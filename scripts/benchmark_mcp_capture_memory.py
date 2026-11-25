@@ -13,6 +13,7 @@ import numpy as np
 import psutil
 
 from ugm.core.capture import FixtureBackend
+from ugm.core.types import NormalizedRect
 from ugm.server import UGMContext, create_server
 
 
@@ -36,7 +37,12 @@ class FreshFrames(FixtureBackend):
         return np.full(self.shape, self.value, dtype=np.uint8)
 
 
-async def measure(width: int, height: int, count: int, ocr_threads: int) -> dict:
+# Padded rectangle around GOLD: 500 in the 900x550 simulator fixture.
+GOLD_ROI = [0.22, 0.0, 0.17, 0.15]
+
+
+async def measure(width: int, height: int, count: int, ocr_threads: int,
+                  ocr_region: str = "full") -> dict:
     fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "sim_fixture.png"
     process = psutil.Process()
     def memory():
@@ -48,14 +54,27 @@ async def measure(width: int, height: int, count: int, ocr_threads: int) -> dict
                          ocr_intra_op_threads=ocr_threads)
         server = create_server(ctx)
         phases["after_context"] = memory()
+        fixture_window = ctx.window_manager.current_window
+        ocr_width, ocr_height = fixture_window.client_width, fixture_window.client_height
+        roi = GOLD_ROI if ocr_region == "gold" else None
+        rect = NormalizedRect(*roi).to_pixel(ocr_width, ocr_height) if roi else None
+        source_size = [rect.width, rect.height] if rect else [ocr_width, ocr_height]
 
         async def read():
-            result = await server.call_tool("read_text", {})
+            result = await server.call_tool("read_text", {"roi": roi} if roi else {})
             if result.is_error:
                 raise RuntimeError("OCR failed")
             out = result.structured_content.get("result", result.structured_content)
-            if "gold" not in out["full_text"].casefold() or not out["items"]:
-                raise RuntimeError("Expected fixture label was not recognized")
+            gold = [item for item in out["items"]
+                    if "".join(item["text"].upper().split()) == "GOLD:500"]
+            if len(gold) != 1:
+                raise RuntimeError(f"Expected one unambiguous GOLD:500 item, got {out['full_text']!r}")
+            box = gold[0]["bbox_normalized"]
+            x, y, w, h = (box[key] for key in ("x", "y", "width", "height"))
+            if not (0.22 <= x < 0.28 and 0.01 <= y < 0.055
+                    and 0.065 < w < 0.13 and 0.012 < h < 0.06
+                    and x + w <= 0.39 and y + h <= 0.15):
+                raise RuntimeError(f"Gold box is not close to the label in full-frame coordinates: {box}")
             boxes = sorted(
                 (item["text"], tuple(sorted(item["bbox_normalized"].items())))
                 for item in out["items"]
@@ -85,6 +104,9 @@ async def measure(width: int, height: int, count: int, ocr_threads: int) -> dict
             "platform": sys.platform,
             "client_frame": [width, height],
             "captures": count,
+            "ocr_fixture_frame": [ocr_width, ocr_height],
+            "ocr_source_size": source_size,
+            "ocr_roi_normalized": roi,
             "ocr_threads_requested": ocr_threads,
             "ocr_threads_effective": ctx.ocr_engine.effective_intra_op_threads,
             "logical_cpus": psutil.cpu_count(),
@@ -108,7 +130,11 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=12)
     parser.add_argument("--ocr-threads", type=int, choices=(-1, 2, 4), default=4,
                         help="-1 uses ONNX Runtime automatic selection")
+    parser.add_argument("--ocr-region", choices=("full", "gold"), default="full",
+                        help="Use the full simulator input or a padded region around GOLD:500")
     args = parser.parse_args()
     if args.count <= 0:
         parser.error("--count must be positive")
-    print(json.dumps(asyncio.run(measure(args.width, args.width * 9 // 16, args.count, args.ocr_threads))))
+    print(json.dumps(asyncio.run(measure(
+        args.width, args.width * 9 // 16, args.count, args.ocr_threads, args.ocr_region
+    ))))
