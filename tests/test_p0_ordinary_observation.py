@@ -380,3 +380,55 @@ async def test_verify_rejects_attachment_round_trip_during_grab(native_ctx, monk
         "pre_capture_id": first["capture_id"], "expected_text": "Research",
     })
     assert result["details"]["error"] == "invalid_pre_capture_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width,height,retained", [(1920, 1080, 5), (3840, 2160, 1)])
+async def test_public_capture_cache_bounds_full_frame_bytes(native_ctx, monkeypatch, width, height, retained):
+    window = replace(WINDOW, width=width, height=height, client_width=width, client_height=height)
+    native_ctx.window_manager.set_mock_window(window)
+    fills = iter((5, 10, 15, 20, 25, 30, 255))
+    monkeypatch.setattr(native_ctx.capture_manager.backend, "capture",
+                        lambda **_: np.full((height, width, 3), next(fills), dtype=np.uint8))
+    results = [await call_observation(native_ctx, "capture_screen", {"roi": [0, 0, 0.01, 0.01]})
+               for _ in range(6)]
+    cache = native_ctx.pre_capture_cache
+    assert len(cache) == retained
+    assert sum(item.frame.nbytes for item in cache.values()) <= 32 * 1024**2
+    assert list(cache) == [item["capture_id"] for item in results[-retained:]]
+    result = await call_observation(native_ctx, "verify_state", {
+        "pre_capture_id": results[-1]["capture_id"],
+        "roi": [0.5, 0.5, 0.01, 0.01],
+    })
+    assert result["verified"] and result["diff_ratio"] == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_buffers_pruned_on_insert_and_lookup(native_ctx, monkeypatch):
+    import ugm.server as server_module
+    now = 0.0
+    monkeypatch.setattr(server_module, "_baseline_clock", lambda: now)
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    monkeypatch.setattr(native_ctx.capture_manager.backend, "capture",
+                        lambda **_: np.zeros((60, 80, 3), dtype=np.uint8))
+    first = await call_observation(native_ctx, "capture_screen", {})
+    now = 61.0
+    second = await call_observation(native_ctx, "capture_screen", {})
+    assert first["capture_id"] not in native_ctx.pre_capture_cache
+    now = 122.0
+    invalid = await call_observation(native_ctx, "verify_state", {"pre_capture_id": second["capture_id"]})
+    assert invalid["details"]["error"] == "invalid_pre_capture_id"
+    assert native_ctx.pre_capture_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_oversize_frame_still_returns_preview_without_retaining_baseline(native_ctx, monkeypatch):
+    import ugm.server as server_module
+    monkeypatch.setattr(server_module, "BASELINE_MAX_BYTES", 100)
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    monkeypatch.setattr(native_ctx.capture_manager.backend, "capture",
+                        lambda **_: np.zeros((60, 80, 3), dtype=np.uint8))
+    capture = await call_observation(native_ctx, "capture_screen", {"roi": [0, 0, 0.5, 0.5]})
+    assert capture["width"] == 40 and capture["image_base64"]
+    assert capture["verification_baseline_available"] is False
+    assert native_ctx.pre_capture_cache == {}

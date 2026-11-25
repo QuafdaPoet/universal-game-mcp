@@ -74,3 +74,19 @@ python scripts/smoke_windows_game_observation.py --process hoi4.exe --title "Hea
 ```
 
 Switch to the game during the countdown. The script launches a separate dry-run server and temporary database; it tests a deliberately wrong title, then explicitly attaches, checks focused window identity and client-sized PNG capture, and verifies a known OCR marker. It does not call any input tools or save screenshots. The screenshot and OCR use separate captures; a pass in a static menu is not proof that the OCR refers to the returned PNG or that gameplay works. Record the commit, game version, client dimensions, display scaling, game UI scale, window mode and printed result. Once this gate passes, a separate read-only HOI4 scenario can use a paused disposable vanilla save: ask the agent to identify one visible production shortfall and cite the evidence for one proposed adjustment, without dispatching it. On failure, keep the output but do not change safety settings to obtain a pass.
+
+## Synthetic MCP capture memory
+
+Visual verification retains at most ten full-frame baselines and 32 MiB of pixel
+buffers total. Expired entries are pruned on insertion or lookup. Newer captures
+can evict earlier IDs before the 60-second timeout. A frame larger than the byte
+limit can still return a preview but reports `verification_baseline_available=false`.
+Preview cropping does not change the coordinate system of a retained baseline.
+
+Run `python -m scripts.benchmark_mcp_capture_memory --width 1920` and then
+`python -m scripts.benchmark_mcp_capture_memory --width 3840` in separate
+processes. These synthetic calls warm OCR, capture filled fixture frames through
+MCP with a small preview ROI, and report cache bytes, ending RSS and OS process
+peak RSS/working set in bytes. Peak includes startup and OCR warmup. It is not a
+live-game measurement or an end-to-end guarantee of the 250 MB target. The older
+direct fixture benchmark does not exercise this cache and reports final RSS only.

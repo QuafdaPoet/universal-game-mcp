@@ -14,6 +14,7 @@ import logging
 from typing import Optional, List, Dict, Any, Annotated
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from threading import Lock
 from uuid import uuid4
 import cv2
 import numpy as np
@@ -76,6 +77,8 @@ DEFAULT_SKILLS_PACK = str(Path(__file__).resolve().parent.parent / "game_skills"
 
 
 BASELINE_MAX_AGE_S = 60.0
+BASELINE_MAX_COUNT = 10
+BASELINE_MAX_BYTES = 32 * 1024**2
 _baseline_clock = time.monotonic
 
 
@@ -98,8 +101,8 @@ class VerificationBaseline:
     scope: ObservationScope
     captured_at: float
 
-    def is_fresh(self) -> bool:
-        return 0 <= _baseline_clock() - self.captured_at < BASELINE_MAX_AGE_S
+    def is_fresh(self, now: Optional[float] = None) -> bool:
+        return 0 <= (now if now is not None else _baseline_clock()) - self.captured_at < BASELINE_MAX_AGE_S
 
 
 class UGMContext:
@@ -135,6 +138,7 @@ class UGMContext:
         self.verifier = ActionVerifier(self.capture_manager, self.ocr_engine, self.input_controller)
         self.dataset_collector = DatasetCollector()
         self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
+        self._baseline_lock = Lock()
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -409,10 +413,39 @@ class UGMContext:
         self.window_manager.set_mock_window(mock_win)
         fixture_backend = FixtureBackend(img)
         self.capture_manager.set_backend(fixture_backend)
-        self.pre_capture_cache.clear()
+        with self._baseline_lock:
+            self.pre_capture_cache.clear()
         self.input_controller.enforce_dry_run = True
         self._offline_fixture_configured = True
         logger.info("UGM configured in offline fixture mode using %s (%dx%d)", fixture_path, w, h)
+
+    def _prune_expired_baselines(self, now: float) -> None:
+        # Caller holds _baseline_lock.
+        for capture_id, baseline in tuple(self.pre_capture_cache.items()):
+            if not baseline.is_fresh(now):
+                del self.pre_capture_cache[capture_id]
+
+    def store_baseline(
+        self, capture_id: str, frame: np.ndarray, scope: ObservationScope,
+    ) -> Optional[VerificationBaseline]:
+        with self._baseline_lock:
+            now = _baseline_clock()
+            self._prune_expired_baselines(now)
+            if frame.nbytes > BASELINE_MAX_BYTES:
+                return None
+            used = sum(b.frame.nbytes for b in self.pre_capture_cache.values())
+            while (len(self.pre_capture_cache) >= BASELINE_MAX_COUNT
+                   or used + frame.nbytes > BASELINE_MAX_BYTES):
+                oldest = next(iter(self.pre_capture_cache))
+                used -= self.pre_capture_cache.pop(oldest).frame.nbytes
+            baseline = VerificationBaseline(frame.copy(), scope, now)
+            self.pre_capture_cache[capture_id] = baseline
+            return baseline
+
+    def get_baseline(self, capture_id: str) -> Optional[VerificationBaseline]:
+        with self._baseline_lock:
+            self._prune_expired_baselines(_baseline_clock())
+            return self.pre_capture_cache.get(capture_id)
 
     def capture_observation(self) -> np.ndarray:
         """Acquire a game-client frame for ordinary MCP capture and OCR."""
@@ -493,12 +526,14 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         Captures the attached, focused game client or explicitly configured fixture.
         Optional 'roi' parameter specifies [x, y, width, height] normalized coordinates (0.0 to 1.0).
-        Use the capture ID for same-scope visual verification within 60 seconds.
+        Use the capture ID for same-scope visual verification within 60 seconds if retained.
+        Older frames can be evicted earlier to meet the verification cache budget.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
         full_frame, scope = ctx.capture_verification_frame()
-        baseline = VerificationBaseline(full_frame.copy(), scope, _baseline_clock())
-        frame = baseline.frame
+        cap_id = f"cap_{uuid4().hex}"
+        baseline = ctx.store_baseline(cap_id, full_frame, scope)
+        frame = baseline.frame if baseline is not None else full_frame
         if norm_roi is not None:
             box = norm_roi.to_pixel(frame.shape[1], frame.shape[0])
             frame = frame[box.y:box.bottom, box.x:box.right]
@@ -509,16 +544,9 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             saved_file = ctx.capture_manager.save_image(frame, save_path)
 
         preview_b64 = ctx.capture_manager.encode_base64_png(frame)
-        cap_id = f"cap_{uuid4().hex}"
-        ctx.pre_capture_cache[cap_id] = baseline
-
-        # Keep cache bounded
-        if len(ctx.pre_capture_cache) > 10:
-            oldest = next(iter(ctx.pre_capture_cache))
-            del ctx.pre_capture_cache[oldest]
-
         return {
             "capture_id": cap_id,
+            "verification_baseline_available": baseline is not None,
             "width": w,
             "height": h,
             "latency_ms": round(ctx.capture_manager.last_latency_ms, 2),
@@ -790,7 +818,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             }
 
         if pre_capture_id is not None:
-            baseline = ctx.pre_capture_cache.get(pre_capture_id)
+            baseline = ctx.get_baseline(pre_capture_id)
             if baseline is None or not baseline.is_fresh():
                 return invalid_baseline()
             try:
