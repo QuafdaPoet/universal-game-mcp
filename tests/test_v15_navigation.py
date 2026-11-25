@@ -94,10 +94,12 @@ async def test_test_c_multistep_navigation_execution():
     })
     nav_data = extract_data(nav_res)
     assert nav_data["success"] is True
-    assert nav_data["current_state"] == "production"
-    assert nav_data["steps_executed"] >= 1
+    assert nav_data["current_state"] == "main_map"
+    assert nav_data["simulated_current_state"] == "production"
+    assert nav_data["steps_executed"] == 0
     assert len(nav_data["step_logs"]) >= 1
-    assert nav_data["step_logs"][0]["verified"] is True
+    assert nav_data["step_logs"][0]["verified"] is False
+    assert nav_data["step_logs"][0]["evidence_level"] == "simulated"
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "universal-game-mcp"
-version = "1.5.0"
+dynamic = ["version"]
 description = "Universal Game MCP (UGM): AI-driven observation, OCR, icon detection, safe inputs, and verification for offline games."
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,12 +13,13 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=2.3.0",
-    "bettercam>=1.0.0",
+    "mcp>=2.3.0,<3",
+    "bettercam>=1.0.0; sys_platform == 'win32'",
     "opencv-python>=4.8.0",
     "pillow>=10.0.0",
-    "pydirectinput>=1.0.4",
-    "pywin32>=306",
+    "numpy>=1.26",
+    "pydirectinput>=1.0.4; sys_platform == 'win32'",
+    "pywin32>=306; sys_platform == 'win32'",
     "rapidocr-onnxruntime>=1.3.8",
     "mss>=9.0.0",
     "psutil>=5.9.0",
@@ -34,4 +35,11 @@ dev = [
 ugm-server = "ugm.server:main"
 
 [tool.setuptools.packages.find]
-include = ["ugm*"]
+include = ["ugm*", "game_skills"]
+
+[tool.setuptools.dynamic]
+version = {attr = "ugm.__version__"}
+
+[tool.setuptools.package-data]
+ugm = ["adapters/hoi4/icons/*.png"]
+game_skills = ["hoi4/manifest.json", "hoi4/skills/*.json", "hoi4/selectors/*.json", "hoi4/templates/*.png"]
