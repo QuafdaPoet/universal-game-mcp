@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -50,7 +51,7 @@ def args_for(tool):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("tool", [*TOOLS, "get_ui_state"])
 @pytest.mark.parametrize("state", [{"is_focused": False}, {"is_minimized": True}], ids=["blurred", "minimized"])
 async def test_invalid_native_window_blocks_capture_before_backend(native_ctx, monkeypatch, tool, state):
     native_ctx.window_manager.set_mock_window(replace(WINDOW, **state))
@@ -83,7 +84,7 @@ async def test_native_frame_is_discarded_when_target_changes_during_grab(native_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("tool", [*TOOLS, "get_ui_state"])
 async def test_native_observation_cannot_accept_an_unconfigured_fixture(native_ctx, monkeypatch, tool):
     native_ctx.window_manager.set_mock_window(WINDOW)
     assert not native_ctx.capture_manager.allow_fixture_fallback
@@ -98,7 +99,7 @@ async def test_native_observation_cannot_accept_an_unconfigured_fixture(native_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("tool", [*TOOLS, "get_ui_state"])
 async def test_native_observation_refuses_wrong_client_frame_size(native_ctx, monkeypatch, tool):
     native_ctx.window_manager.set_mock_window(WINDOW)
     monkeypatch.setattr(native_ctx.capture_manager.backend, "capture", lambda **_: np.zeros(
@@ -146,7 +147,7 @@ async def test_explicit_fixture_observation_does_not_require_native_focus(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("tool", [*TOOLS, "get_ui_state"])
 async def test_fixture_observation_never_runs_an_accidentally_native_backend(tmp_path, monkeypatch, tool):
     ctx = UGMContext(
         offline_fixture=str(FIXTURE), db_path=tmp_path / "test.db",
@@ -183,3 +184,91 @@ async def test_fixture_switch_invalidates_native_dry_run_and_fixture_baselines(t
         assert payload["capture_id"] in ctx.pre_capture_cache
         ctx.setup_offline_fixture(str(FIXTURE), title=title)
         assert ctx.pre_capture_cache == {}
+
+
+def prevent_recognition(ctx, monkeypatch):
+    def should_not_run(*args, **kwargs):
+        pytest.fail("Rejected frame reached state recognition or the knowledge store")
+
+    monkeypatch.setattr(ctx.state_recognizer, "recognize_state", should_not_run)
+    for method in ("find_matching_state", "record_ui_state"):
+        monkeypatch.setattr(ctx.storage, method, should_not_run)
+
+
+@pytest.mark.asyncio
+async def test_ui_state_requires_a_native_attachment(native_ctx, monkeypatch):
+    prevent_recognition(native_ctx, monkeypatch)
+    with pytest.raises(SafetyViolationError, match="No target game window attached"):
+        await create_server(native_ctx).call_tool("get_ui_state", {})
+
+
+@pytest.mark.asyncio
+async def test_ui_state_rejects_a_different_game_before_capture(native_ctx, monkeypatch):
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    prevent_recognition(native_ctx, monkeypatch)
+    with pytest.raises(SafetyViolationError, match="does not match"):
+        await create_server(native_ctx).call_tool("get_ui_state", {"game_id": "other_game"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("game_id", [None, "offline_test"], ids=["derive-from-window", "matching-id"])
+async def test_ui_state_recognizes_only_the_captured_game(native_ctx, monkeypatch, game_id):
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    assert native_ctx.active_game_id != "offline_test"
+    frame = np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+
+    def grab(window, roi):
+        assert window == WINDOW
+        return frame
+
+    def recognize(image, *, game_id, hint_state, simulation, record_observation):
+        assert image is frame
+        assert game_id == "offline_test"
+        assert hint_state == "main_view"
+        assert simulation is native_ctx.simulation_session
+        assert record_observation is True
+        return SimpleNamespace(to_dict=lambda: {"state_name": "main_view"})
+
+    monkeypatch.setattr(native_ctx.capture_manager.backend, "capture", grab)
+    monkeypatch.setattr(native_ctx.state_recognizer, "recognize_state", recognize)
+    args = {"hint_state": "main_view"}
+    if game_id is not None:
+        args["game_id"] = game_id
+    result = await create_server(native_ctx).call_tool("get_ui_state", args)
+    assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_ui_state_discards_native_frame_if_target_changes(native_ctx, monkeypatch):
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    prevent_recognition(native_ctx, monkeypatch)
+
+    def grab(window, roi):
+        assert window == WINDOW
+        native_ctx.window_manager.set_mock_window(replace(WINDOW, process_name="other.exe"))
+        return np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(native_ctx.capture_manager.backend, "capture", grab)
+    with pytest.raises(SafetyViolationError, match="target"):
+        await create_server(native_ctx).call_tool("get_ui_state", {})
+    assert native_ctx.capture_manager.last_frame is None
+
+
+@pytest.mark.asyncio
+async def test_ui_state_keeps_explicit_fixture_id_in_simulation(tmp_path, monkeypatch):
+    ctx = UGMContext(
+        offline_fixture=str(FIXTURE), db_path=tmp_path / "test.db",
+        ocr_backend="mock", skills_pack_dir=None,
+    )
+    ctx.window_manager.set_mock_window(replace(ctx.window_manager.current_window, is_focused=False))
+
+    def recognize(frame, *, game_id, hint_state, simulation, record_observation):
+        assert frame.size
+        assert game_id == "fixture_scenario"
+        assert simulation is True
+        assert record_observation is True
+        return SimpleNamespace(to_dict=lambda: {"state_name": "fixture"})
+
+    monkeypatch.setattr(ctx.state_recognizer, "recognize_state", recognize)
+    result = await create_server(ctx).call_tool("get_ui_state", {"game_id": "fixture_scenario"})
+    assert not result.is_error

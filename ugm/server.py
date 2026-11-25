@@ -12,7 +12,7 @@ import base64
 import time
 import logging
 from typing import Optional, List, Dict, Any, Annotated
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 import cv2
@@ -859,10 +859,21 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     ) -> Dict[str, Any]:
         """
         Classifies and reports the current game interface state (e.g. main_map, production, research, paused).
+        Native frames require a focused attachment; an explicit game ID must match the attached game.
         Returns confidence, supporting observable evidence, perceptual hash, and whether state is known/ambiguous/unknown.
         """
-        target_game_id = game_id or ctx.active_game_id or "hoi4"
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        if ctx._offline_fixture_configured:
+            target_game_id = game_id or ctx.active_game_id or "hoi4"
+            frame = ctx.capture_observation()
+        else:
+            attached_window = ctx.window_manager.current_window
+            if attached_window is None:
+                raise SafetyViolationError("No target game window attached. Attach a game before classifying its UI.")
+            window = replace(attached_window)
+            target_game_id = game_id_for_window(window)
+            if game_id is not None and game_id != target_game_id:
+                raise SafetyViolationError("Requested game_id does not match the attached game.")
+            frame = ctx.capture_manager.capture_attached_window(ctx.window_manager, window)
         det = ctx.state_recognizer.recognize_state(
             frame, game_id=target_game_id, hint_state=hint_state,
             simulation=ctx.simulation_session,
