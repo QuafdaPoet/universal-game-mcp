@@ -12,7 +12,7 @@ import base64
 import time
 import logging
 from typing import Optional, List, Dict, Any, Annotated
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 import cv2
@@ -35,7 +35,7 @@ from .core.types import (
     VisionAgentEscalation,
 )
 from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
-from .core.window import WindowManager, game_id_for_window
+from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
@@ -75,6 +75,33 @@ logger = logging.getLogger("ugm.server")
 DEFAULT_SKILLS_PACK = str(Path(__file__).resolve().parent.parent / "game_skills" / "hoi4")
 
 
+BASELINE_MAX_AGE_S = 60.0
+_baseline_clock = time.monotonic
+
+
+class InvalidVerificationBaseline(ValueError):
+    """The caller must capture a new same-scope verification baseline."""
+
+
+@dataclass(frozen=True)
+class ObservationScope:
+    attachment_revision: int
+    binding: Optional[tuple]
+    simulation: bool
+    fixture: bool
+    backend_revision: int
+
+
+@dataclass(frozen=True)
+class VerificationBaseline:
+    frame: np.ndarray
+    scope: ObservationScope
+    captured_at: float
+
+    def is_fresh(self) -> bool:
+        return 0 <= _baseline_clock() - self.captured_at < BASELINE_MAX_AGE_S
+
+
 class UGMContext:
     """Dependency container holding game MCP subsystems."""
 
@@ -107,7 +134,7 @@ class UGMContext:
         self.input_controller = InputController(self.window_manager, enforce_dry_run=self.simulation_session)
         self.verifier = ActionVerifier(self.capture_manager, self.ocr_engine, self.input_controller)
         self.dataset_collector = DatasetCollector()
-        self.pre_capture_cache: Dict[str, np.ndarray] = {}
+        self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -389,13 +416,41 @@ class UGMContext:
 
     def capture_observation(self) -> np.ndarray:
         """Acquire a game-client frame for ordinary MCP capture and OCR."""
-        window = self.window_manager.current_window
+        return self._capture_observation_for_window(self.window_manager.current_window)
+
+    def _capture_observation_for_window(self, window: Optional[WindowInfo]) -> np.ndarray:
         if self._offline_fixture_configured:
             if not isinstance(self.capture_manager.backend, FixtureBackend):
                 raise SafetyViolationError("Offline observation requires the configured fixture capture backend.")
             return self.capture_manager.capture(window=window)
         # --dry-run limits hardware input, not the scope of real observation.
         return self.capture_manager.capture_attached_window(self.window_manager, window)
+
+    def _observation_scope(self, window: Optional[WindowInfo]) -> ObservationScope:
+        return ObservationScope(
+            self.window_manager.attachment_revision,
+            window_binding(window) if window is not None else None,
+            self.simulation_session,
+            self._offline_fixture_configured,
+            self.capture_manager.backend_revision,
+        )
+
+    def capture_verification_frame(
+        self, baseline: Optional[VerificationBaseline] = None,
+    ) -> tuple[np.ndarray, ObservationScope]:
+        current = self.window_manager.current_window
+        window = replace(current) if current is not None else None
+        scope = self._observation_scope(window)
+        if baseline is not None and (baseline.scope != scope or not baseline.is_fresh()):
+            raise InvalidVerificationBaseline()
+        frame = self._capture_observation_for_window(window)
+        if scope != self._observation_scope(self.window_manager.current_window):
+            if baseline is not None:
+                raise InvalidVerificationBaseline()
+            raise SafetyViolationError("Observation target or backend changed during capture; retry capture.")
+        if baseline is not None and not baseline.is_fresh():
+            raise InvalidVerificationBaseline()
+        return frame, scope
 
 
 def create_server(context: Optional[UGMContext] = None) -> MCPServer:
@@ -438,13 +493,15 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         Captures the attached, focused game client or explicitly configured fixture.
         Optional 'roi' parameter specifies [x, y, width, height] normalized coordinates (0.0 to 1.0).
+        Use the capture ID for same-scope visual verification within 60 seconds.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        full_frame = ctx.capture_observation()
-        frame = full_frame
+        full_frame, scope = ctx.capture_verification_frame()
+        baseline = VerificationBaseline(full_frame.copy(), scope, _baseline_clock())
+        frame = baseline.frame
         if norm_roi is not None:
-            box = norm_roi.to_pixel(full_frame.shape[1], full_frame.shape[0])
-            frame = full_frame[box.y:box.bottom, box.x:box.right]
+            box = norm_roi.to_pixel(frame.shape[1], frame.shape[0])
+            frame = frame[box.y:box.bottom, box.x:box.right]
 
         h, w = frame.shape[:2]
         saved_file = None
@@ -453,7 +510,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
         preview_b64 = ctx.capture_manager.encode_base64_png(frame)
         cap_id = f"cap_{uuid4().hex}"
-        ctx.pre_capture_cache[cap_id] = full_frame
+        ctx.pre_capture_cache[cap_id] = baseline
 
         # Keep cache bounded
         if len(ctx.pre_capture_cache) > 10:
@@ -720,21 +777,27 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         Without a baseline, checks that expected_text appears in the current frame or ROI.
         With pre_capture_id, checks frame change and any requested text in full-window coordinates.
+        Baselines expire after 60 seconds or when attachment or capture scope changes.
         """
         norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        post_frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        def invalid_baseline() -> Dict[str, Any]:
+            return {
+                "verified": False,
+                "diff_ratio": 0.0,
+                "message": "Verification failed: pre_capture_id was not found in cache, has expired, or belongs to a different observation scope. Capture a new baseline.",
+                "latency_ms": 0.0,
+                "details": {"error": "invalid_pre_capture_id"},
+            }
 
-        pre_frame = None
         if pre_capture_id is not None:
-            if pre_capture_id not in ctx.pre_capture_cache:
-                return {
-                    "verified": False,
-                    "diff_ratio": 0.0,
-                    "message": f"Verification failed: pre_capture_id '{pre_capture_id}' was not found in cache or has expired.",
-                    "latency_ms": 0.0,
-                    "details": {"error": "invalid_pre_capture_id"}
-                }
-            pre_frame = ctx.pre_capture_cache[pre_capture_id]
+            baseline = ctx.pre_capture_cache.get(pre_capture_id)
+            if baseline is None or not baseline.is_fresh():
+                return invalid_baseline()
+            try:
+                post_frame, scope = ctx.capture_verification_frame(baseline)
+            except InvalidVerificationBaseline:
+                return invalid_baseline()
+            pre_frame = baseline.frame
         else:
             if expected_text is None and min_diff_ratio > 0.0:
                 return {
@@ -744,6 +807,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                     "latency_ms": 0.0,
                     "details": {"error": "missing_baseline"}
                 }
+            post_frame, scope = ctx.capture_verification_frame()
             pre_frame = post_frame
             if expected_text is not None:
                 min_diff_ratio = 0.0
@@ -757,7 +821,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         )
         result = ver_res.to_dict()
         result["evidence_level"] = (
-            "simulated" if ctx.simulation_session else
+            "simulated" if scope.simulation else
             "verified" if ver_res.verified and (expected_text or min_diff_ratio > 0.0) else "observed"
         )
         return result

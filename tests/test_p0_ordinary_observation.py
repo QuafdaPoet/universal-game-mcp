@@ -129,7 +129,7 @@ async def test_native_observation_remains_available_with_focused_attachment(nati
     payload = result.structured_content.get("result", result.structured_content)
     if tool == "capture_screen":
         assert (payload["width"], payload["height"]) == (40, 30)
-        assert native_ctx.pre_capture_cache[payload["capture_id"]].shape == (60, 80, 3)
+        assert native_ctx.pre_capture_cache[payload["capture_id"]].frame.shape == (60, 80, 3)
     else:
         assert payload["engine"] == "MockOCR"
 
@@ -272,3 +272,111 @@ async def test_ui_state_keeps_explicit_fixture_id_in_simulation(tmp_path, monkey
     monkeypatch.setattr(ctx.state_recognizer, "recognize_state", recognize)
     result = await create_server(ctx).call_tool("get_ui_state", {"game_id": "fixture_scenario"})
     assert not result.is_error
+
+
+async def call_observation(ctx, tool, args):
+    result = await create_server(ctx).call_tool(tool, args)
+    assert not result.is_error
+    return result.structured_content.get("result", result.structured_content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["verify_state", "verify_selection"])
+async def test_invalid_baseline_does_not_capture(native_ctx, monkeypatch, tool):
+    native_ctx.window_manager.set_mock_window(WINDOW)
+    prevent_outputs(native_ctx, monkeypatch)
+    result = await call_observation(native_ctx, tool, {
+        "pre_capture_id": "missing", "expected_text": "Research",
+    })
+    assert not result["verified"]
+    assert result["details"]["error"] == "invalid_pre_capture_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["swap", "round_trip", "geometry", "expired", "backend"])
+async def test_stale_baseline_is_rejected_before_capture_and_ocr(native_ctx, monkeypatch, change):
+    import ugm.server as server_module
+    ctx = native_ctx
+    ctx.window_manager.set_mock_window(WINDOW)
+    backend = ctx.capture_manager.backend
+    reject_grab = backend.capture
+    frame = np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+    monkeypatch.setattr(backend, "capture", lambda **_: frame)
+    first = await call_observation(ctx, "capture_screen", {})
+    monkeypatch.setattr(backend, "capture", reject_grab)
+    prevent_outputs(ctx, monkeypatch)
+
+    if change in {"swap", "round_trip"}:
+        other = replace(WINDOW, hwnd=WINDOW.hwnd + 1, pid=WINDOW.pid + 1, process_name="other.exe")
+        ctx.window_manager.attach_window(other)
+        if change == "round_trip":
+            ctx.window_manager.attach_window(WINDOW)
+    elif change == "geometry":
+        # Simulate an in-place native refresh, not an explicit attach.
+        moved = replace(WINDOW, client_x=WINDOW.client_x + 1)
+        monkeypatch.setattr(type(ctx.window_manager), "current_window", property(lambda _: moved))
+    elif change == "expired":
+        now = server_module.time.monotonic()
+        monkeypatch.setattr(server_module, "_baseline_clock", lambda: now + 300)
+    else:
+        ctx.capture_manager.set_backend(type(backend)())
+
+    result = await call_observation(ctx, "verify_state", {
+        "pre_capture_id": first["capture_id"], "expected_text": "Research",
+    })
+    assert result["verified"] is False
+    assert result["details"]["error"] == "invalid_pre_capture_id"
+
+
+@pytest.mark.asyncio
+async def test_fresh_native_baseline_and_text_only_still_work(native_ctx, monkeypatch):
+    ctx = native_ctx
+    ctx.window_manager.set_mock_window(WINDOW)
+    dark = np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+    frames = iter((dark, np.full_like(dark, 255), dark))
+    monkeypatch.setattr(ctx.capture_manager.backend, "capture", lambda **_: next(frames))
+    first = await call_observation(ctx, "capture_screen", {"roi": [0.0, 0.0, 0.5, 0.5]})
+    result = await call_observation(ctx, "verify_selection", {"pre_capture_id": first["capture_id"]})
+    assert result["verified"] and result["diff_ratio"] == 1
+    monkeypatch.setattr(ctx.ocr_engine, "read_text", lambda *args, **kwargs: SimpleNamespace(full_text="Research"))
+    text_result = await call_observation(ctx, "verify_state", {"expected_text": "Research"})
+    assert text_result["verified"]
+    assert text_result["evidence_level"] == ("simulated" if ctx.simulation_session else "verified")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attach_tool", ["get_game_window", "discover_and_attach_game"])
+async def test_public_selection_invalidates_prior_baseline(native_ctx, monkeypatch, attach_tool):
+    ctx = native_ctx
+    ctx.window_manager.set_mock_window(WINDOW)
+    backend = ctx.capture_manager.backend
+    reject_grab = backend.capture
+    frame = np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+    monkeypatch.setattr(backend, "capture", lambda **_: frame)
+    first = await call_observation(ctx, "capture_screen", {})
+    attached = await call_observation(ctx, attach_tool, {"process_name": WINDOW.process_name, "window_title": WINDOW.title})
+    assert attached.get("found") or attached.get("attached")
+    monkeypatch.setattr(backend, "capture", reject_grab)
+    result = await call_observation(ctx, "verify_state", {"pre_capture_id": first["capture_id"]})
+    assert result["details"]["error"] == "invalid_pre_capture_id"
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_attachment_round_trip_during_grab(native_ctx, monkeypatch):
+    ctx = native_ctx
+    ctx.window_manager.set_mock_window(WINDOW)
+    frame = np.zeros((WINDOW.client_height, WINDOW.client_width, 3), dtype=np.uint8)
+    monkeypatch.setattr(ctx.capture_manager.backend, "capture", lambda **_: frame)
+    first = await call_observation(ctx, "capture_screen", {})
+
+    def grab(**kwargs):
+        ctx.window_manager.attach_window(replace(WINDOW, hwnd=WINDOW.hwnd + 1))
+        ctx.window_manager.attach_window(WINDOW)
+        return np.full_like(frame, 255)
+
+    monkeypatch.setattr(ctx.capture_manager.backend, "capture", grab)
+    prevent_outputs(ctx, monkeypatch)
+    result = await call_observation(ctx, "verify_selection", {
+        "pre_capture_id": first["capture_id"], "expected_text": "Research",
+    })
+    assert result["details"]["error"] == "invalid_pre_capture_id"

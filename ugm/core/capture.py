@@ -282,6 +282,7 @@ class CaptureManager:
         self.require_window = require_window
         self.capture_dir = os.path.abspath(capture_dir) if capture_dir else os.path.abspath(self.DEFAULT_CAPTURE_DIR)
         self._backend: BaseCaptureBackend
+        self._backend_revision = 0
         if backend_override is not None:
             self._backend = backend_override
         else:
@@ -348,10 +349,17 @@ class CaptureManager:
     def backend(self) -> BaseCaptureBackend:
         return self._backend
 
+    @property
+    def backend_revision(self) -> int:
+        return self._backend_revision
+
     def set_backend(self, backend: BaseCaptureBackend) -> None:
-        if self._backend is not None and self._backend is not backend:
+        if self._backend is backend:
+            return
+        if self._backend is not None:
             self._backend.release()
         self._backend = backend
+        self._backend_revision += 1
 
     def capture(
         self,

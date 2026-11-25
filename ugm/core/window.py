@@ -49,22 +49,30 @@ class WindowManager:
     def __init__(self, mock_window: Optional[WindowInfo] = None):
         self._mock_window = mock_window
         self._current_window: Optional[WindowInfo] = mock_window
+        self._attachment_revision = 0
 
     def set_mock_window(self, mock: Optional[WindowInfo]) -> None:
         """Sets a mock window for testing in headless or virtual environments."""
         self._mock_window = mock
         self._current_window = mock
+        self._attachment_revision += 1
+
+    @property
+    def attachment_revision(self) -> int:
+        return self._attachment_revision
 
     def attach_window(self, win: Optional[WindowInfo]) -> None:
         """Set the active window; only explicit fixture setup creates a mock."""
         self._current_window = win
         if self._mock_window is not None:
             self._mock_window = win
+        self._attachment_revision += 1
 
     @property
     def current_window(self) -> Optional[WindowInfo]:
         if self._mock_window is not None:
             return self._mock_window
+        revision = self._attachment_revision
         previous = self._current_window
         if previous is None or sys.platform != "win32":
             return previous
@@ -85,9 +93,11 @@ class WindowManager:
                     fresh = candidate
         except Exception as exc:
             logger.debug("Could not refresh attached window: %s", exc)
-        if self._current_window is not previous:
+        if self._current_window is not previous or self._attachment_revision != revision:
             # A concurrent attach changed the selection during refresh.
             return None
+        if fresh is None or window_binding(fresh) != window_binding(previous):
+            self._attachment_revision += 1
         self._current_window = fresh
         return fresh
 
@@ -148,7 +158,7 @@ class WindowManager:
                 matches_title = bool(self._mock_window.title and window_title.casefold() in self._mock_window.title.casefold())
 
             if matches_title and self._process_matches(process_name, self._mock_window.process_name):
-                self._current_window = self._mock_window
+                self.attach_window(self._mock_window)
                 return self._mock_window
             return None
 
@@ -209,7 +219,7 @@ class WindowManager:
                 continue
             # Do not absorb anti-cheat denials into an ordinary discovery miss.
             safety_manager.validate_process(info.process_name)
-            self._current_window = info
+            self.attach_window(info)
             return info
         return None
 
