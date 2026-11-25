@@ -2,9 +2,12 @@ name: Windows CI - Universal Game MCP (UGM)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'release/**' ]
   pull_request:
     branches: [ main, master ]
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -13,6 +16,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -37,6 +42,31 @@ jobs:
         run: |
           python scripts/benchmark_cpu_ram.py
 
+      - name: Measure synthetic MCP capture memory
+        run: |
+          python -m scripts.benchmark_mcp_capture_memory --width 1920
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m scripts.benchmark_mcp_capture_memory --width 3840
+
       - name: Run End-to-End Offline Simulator Demo
         run: |
           python scripts/demo_offline_sim.py
+
+
+      - name: Check installed wheel outside the checkout
+        shell: pwsh
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem dist/universal_game_mcp-*.whl).FullName
+          python -m pip install --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location $env:RUNNER_TEMP
+          try {
+            python -m ugm.server --version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python -c "from pathlib import Path; from importlib.metadata import version; from ugm import __version__; from ugm.server import DEFAULT_SKILLS_PACK; from ugm.skills.loader import GameSkillPackLoader; p = GameSkillPackLoader.load_pack(DEFAULT_SKILLS_PACK); assert p.skills and p.selectors and (Path(p.templates_dir) / 'pause_btn.png').is_file(); assert version('universal-game-mcp') == __version__"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
