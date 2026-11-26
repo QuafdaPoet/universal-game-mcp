@@ -78,14 +78,13 @@ async def test_disallowed_action_primitives_rejected():
 
 
 @pytest.mark.asyncio
-async def test_test_d_self_learning_cycle_and_promotion(tmp_path):
+async def test_test_d_dry_run_keeps_persisted_candidate(tmp_path):
     """
     Test D Scenario:
     1. Complete an initially unknown simulated workflow.
     2. Save candidate skill with preconditions and postconditions.
-    3. Validate candidate skill through repeated verified executions.
-    4. Automatically promote to verified skill.
-    5. Close session, reopen new session, and reuse verified skill.
+    3. Rehearse the candidate without validating or promoting it.
+    4. Reopen the isolated fixture store and retrieve the persisted candidate.
     """
     db_file = str(tmp_path / "self_learning_lifecycle.db")
 
@@ -121,7 +120,9 @@ async def test_test_d_self_learning_cycle_and_promotion(tmp_path):
     assert list_data1["count"] == 1
     assert list_data1["skills"][0]["status"] == "candidate"
 
-    # 2. Validate skill execution #1
+    starting_validation_count = list_data1["skills"][0]["validation_count"]
+
+    # 2. Rehearse the candidate.
     exec1 = await server1.call_tool("execute_skill", {
         "game_id": "hoi4",
         "skill_id": "learned_research_flow",
@@ -129,7 +130,7 @@ async def test_test_d_self_learning_cycle_and_promotion(tmp_path):
     })
     assert extract_data(exec1)["success"] is True
 
-    # 3. Validate skill execution #2 (reaches promotion threshold)
+    # 3. Rehearse the same sequence again, still without validation.
     exec2 = await server1.call_tool("execute_skill", {
         "game_id": "hoi4",
         "skill_id": "learned_research_flow",
@@ -137,29 +138,29 @@ async def test_test_d_self_learning_cycle_and_promotion(tmp_path):
     })
     assert extract_data(exec2)["success"] is True
 
-    # Check status: should be promoted to 'verified'
+    # Neither rehearsal supplies live evidence.
     status_res1 = await server1.call_tool("get_learning_status", {"game_id": "hoi4"})
     status_data1 = extract_data(status_res1)
-    assert status_data1["verified_skills"] >= 1
+    assert status_data1["verified_skills"] == 0
 
     ctx1.storage.db.close()
     del server1
     del ctx1
 
     # ========================================================
-    # SESSION 2: Independent session reuses verified skill
+    # SESSION 2: Independent fixture session reuses the candidate.
     # ========================================================
     ctx2 = UGMContext(offline_fixture="tests/fixtures/hoi4_topbar.png", db_path=db_file)
     ctx2.input_controller.dry_run_default = True
     server2 = create_server(ctx2)
 
-    list_res2 = await server2.call_tool("list_learned_skills", {"game_id": "hoi4", "status": "verified"})
+    list_res2 = await server2.call_tool("list_learned_skills", {"game_id": "hoi4", "status": "candidate"})
     list_data2 = extract_data(list_res2)
     assert list_data2["count"] == 1
-    verified_skill = list_data2["skills"][0]
-    assert verified_skill["skill_id"] == "learned_research_flow"
-    assert verified_skill["status"] == "verified"
-    assert verified_skill["validation_count"] >= 2
+    candidate_skill = list_data2["skills"][0]
+    assert candidate_skill["skill_id"] == "learned_research_flow"
+    assert candidate_skill["status"] == "candidate"
+    assert candidate_skill["validation_count"] == starting_validation_count
 
     # Execute reused verified skill
     reuse_exec = await server2.call_tool("execute_skill", {
