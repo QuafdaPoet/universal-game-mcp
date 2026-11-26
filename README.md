@@ -150,6 +150,8 @@ The last command starts a **stdio** server that expects a client; output is not 
 
 Use absolute paths in client configuration. Built-in HOI4 resources load from the installed package regardless of working directory. The default database remains `data/memory/ugm_memory.db` relative to launch directory, for compatibility; use `--db-path` to select it explicitly. Dry-run prevents hardware input; it is not a filesystem sandbox, and local data tools can still write files or SQLite records. Use a trusted local MCP client and a separate database for trials.
 
+**Dataset collection is off by default.** To allow `save_training_sample` to write attached game-client images under `data/samples`, set `UGM_DATASET_COLLECTION=1` in the MCP server process environment and restart it. A tool caller cannot opt in for the operator; `force=True` is only a one-sample shortcut on an explicitly configured fixture. Dataset sidecars separately label fixture, dry-run observations, and live observations. They are not verified action or skill evidence.
+
 ### Developer verification
 
 After activating the environment, run the checks from the checkout root:

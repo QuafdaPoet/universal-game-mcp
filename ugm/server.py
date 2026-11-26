@@ -83,6 +83,18 @@ BASELINE_MAX_BYTES = 32 * 1024**2
 _baseline_clock = time.monotonic
 
 
+def _parse_observation_roi(roi: Optional[List[float]], label: str) -> Optional[NormalizedRect]:
+    if roi is None:
+        return None
+    if len(roi) != 4 or not all(math.isfinite(value) for value in roi):
+        raise ValueError(f"{label} ROI must contain four finite [x, y, width, height] values.")
+    x, y, width, height = roi
+    if (not (0 <= x < 1 and 0 <= y < 1 and 0 < width <= 1 and 0 < height <= 1)
+            or x + width > 1 + 1e-12 or y + height > 1 + 1e-12):
+        raise ValueError(f"{label} ROI must have positive size and lie within the normalized frame.")
+    return NormalizedRect(*roi)
+
+
 class InvalidVerificationBaseline(ValueError):
     """The caller must capture a new same-scope verification baseline."""
 
@@ -141,7 +153,7 @@ class UGMContext:
         )
         self.input_controller = InputController(self.window_manager, enforce_dry_run=self.simulation_session)
         self.verifier = ActionVerifier(self.capture_manager, self.ocr_engine, self.input_controller)
-        self.dataset_collector = DatasetCollector()
+        self.dataset_collector = DatasetCollector(enabled=os.environ.get("UGM_DATASET_COLLECTION") == "1")
         self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
         self._baseline_lock = Lock()
 
@@ -570,15 +582,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Returns bounding boxes normalized relative to the full game window.
         Omit roi for full-frame OCR, or supply [x, y, width, height] within [0, 1].
         """
-        norm_roi = None
-        if roi is not None:
-            if len(roi) != 4 or not all(math.isfinite(value) for value in roi):
-                raise ValueError("OCR ROI must contain four finite [x, y, width, height] values.")
-            x, y, width, height = roi
-            if (not (0 <= x < 1 and 0 <= y < 1 and 0 < width <= 1 and 0 < height <= 1)
-                    or x + width > 1 + 1e-12 or y + height > 1 + 1e-12):
-                raise ValueError("OCR ROI must have positive size and lie within the normalized frame.")
-            norm_roi = NormalizedRect(*roi)
+        norm_roi = _parse_observation_roi(roi, "OCR")
         frame = ctx.capture_observation()
         ocr_res = ctx.ocr_engine.read_text(frame, roi=norm_roi, event_tag=event_tag)
         return ocr_res.to_dict()
@@ -905,17 +909,31 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         force: bool = False
     ) -> Dict[str, Any]:
         """
-        Opt-in saving of game frame annotations for dataset collection.
-        Disabled by default to protect privacy. Stored locally and excluded from git.
+        Opt-in saving of attached game-client frames, stored locally and excluded from git.
+        Live capture requires operator opt-in via UGM_DATASET_COLLECTION=1.
+        force=True enables one sample only for an explicitly configured offline fixture.
+        Omit roi for the whole frame, or supply [x, y, width, height] within [0, 1].
         """
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-        return ctx.dataset_collector.save_sample(
+        collector = ctx.dataset_collector
+        collector.validate_tag(tag)
+        norm_roi = _parse_observation_roi(roi, "Dataset")
+        if not collector.enabled and not (force and ctx._offline_fixture_configured):
+            return collector.disabled_result(force_allowed=ctx._offline_fixture_configured)
+
+        frame, scope = ctx.capture_verification_frame()
+        if scope.fixture:
+            source = "offline_fixture"
+        elif scope.simulation:
+            source = "dry_run_observation"
+        else:
+            source = "live_observation"
+        return collector.save_sample(
             image=frame,
             tag=tag,
             roi=norm_roi,
             metadata=metadata,
-            force=force
+            force=force,
+            observation_source=source,
         )
 
     # 11. list_game_packs
