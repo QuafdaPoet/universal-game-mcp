@@ -171,13 +171,14 @@ class WindowManager:
         import psutil
 
         matches: List[Tuple[int, int]] = []
+        title_query = window_title.casefold() if window_title else None
 
         def enum_windows_callback(hwnd: int, _extra: None) -> bool:
             try:
                 if not win32gui.IsWindowVisible(hwnd):
                     return True
                 title = win32gui.GetWindowText(hwnd).strip()
-                if not title:
+                if not title or (title_query and title_query not in title.casefold()):
                     return True
 
                 try:
@@ -186,8 +187,7 @@ class WindowManager:
                 except Exception:
                     pname = ""
 
-                title_matched = not window_title or window_title.casefold() in title.casefold()
-                if pname and title_matched and self._process_matches(process_name, pname):
+                if pname and self._process_matches(process_name, pname):
                     matches.append((hwnd, pid))
                 return True
             except Exception as e:

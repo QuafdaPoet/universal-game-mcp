@@ -6,7 +6,6 @@ Designed for execution under both pytest and python -m unittest.
 
 import os
 import sys
-import time
 import shutil
 import tempfile
 import unittest
@@ -453,28 +452,20 @@ class TestVulnerabilitiesRegression(unittest.TestCase):
                     elif pat == "(*":
                         self.assertIsNone(win)
 
-    def test_vuln07_find_window_redos_backtracking_safe(self):
-        """VULN-07: Catastrophic backtracking ReDoS pattern (a+)+$ evaluates safely without freezing."""
+    def test_vuln07_native_nonliteral_title_does_not_query_process(self):
+        """Reject a nonliteral title before looking up its process."""
         wm = WindowManager()
-        long_title = "a" * 30 + "!"
 
-        def mock_enum_windows(callback, extra):
-            with patch("win32gui.GetWindowText", return_value=long_title):
-                callback(2001, extra)
+        def enum_one(callback, extra):
+            callback(2001, extra)
 
         with patch("sys.platform", "win32"), \
              patch("win32gui.IsWindowVisible", return_value=True), \
-             patch("win32process.GetWindowThreadProcessId", return_value=(1, 201)), \
-             patch("psutil.Process"), \
-             patch("win32gui.EnumWindows", side_effect=mock_enum_windows):
-
-            t0 = time.perf_counter()
-            win = wm.find_window(window_title="(a+)+$")
-            elapsed = time.perf_counter() - t0
-
-            # Must evaluate essentially instantaneously (< 0.1s), proving no exponential backtracking
-            self.assertLess(elapsed, 0.1)
-            self.assertIsNone(win)
+             patch("win32gui.GetWindowText", return_value="Fixture Menu"), \
+             patch("win32gui.EnumWindows", side_effect=enum_one), \
+             patch("win32process.GetWindowThreadProcessId") as get_pid:
+            self.assertIsNone(wm.find_window(window_title="Fixture .*"))
+            get_pid.assert_not_called()
 
 
 if __name__ == "__main__":
