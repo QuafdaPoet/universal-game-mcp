@@ -1,3 +1,5 @@
+> **Lưu ý phiên bản:** Phần bên dưới ghi lại kiến trúc và kết quả của V1.5. Xem [Quickstart hiện tại](../../README.md#quickstart) để cài bản V2 đang phát triển, chạy fixture với `--dry-run` và xem trạng thái kiểm thử.
+
 # Hướng dẫn Universal Game MCP (UGM) - Phiên bản V1.5 (Tiếng Việt)
 
 Dự án mã nguồn mở **Universal Game MCP (UGM)** xây dựng hạ tầng máy chủ Model Context Protocol (MCP) gọn nhẹ, độc lập và có khả năng tự học cho các trợ lý trí tuệ nhân tạo (AI/LLM). 

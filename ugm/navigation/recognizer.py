@@ -64,7 +64,10 @@ class UIStateRecognizer:
         self,
         frame: np.ndarray,
         game_id: str = "hoi4",
-        hint_state: Optional[str] = None
+        hint_state: Optional[str] = None,
+        *,
+        simulation: bool = False,
+        record_observation: bool = True
     ) -> UIStateDetection:
         """
         Classifies the active UI state from a video frame.
@@ -73,7 +76,10 @@ class UIStateRecognizer:
         phash = compute_dhash(frame)
         signals: Dict[str, Any] = {}
         candidate_scores: Dict[str, float] = {}
-        evidence: Dict[str, Any] = {"phash": phash, "game_id": game_id}
+        evidence: Dict[str, Any] = {
+            "phash": phash, "game_id": game_id,
+            "evidence_level": "simulated" if simulation else "observed",
+        }
 
         h, w = frame.shape[:2]
 
@@ -149,7 +155,10 @@ class UIStateRecognizer:
         )
 
         # Auto-record high-confidence known states into persistent memory
-        if self.storage and status == "known" and norm_confidence >= 0.80:
+        if (
+            record_observation and self.storage and status == "known" and norm_confidence >= 0.80
+            and (not simulation or self.storage.db.simulation)
+        ):
             try:
                 self.storage.record_ui_state(
                     game_id=game_id,
@@ -157,7 +166,7 @@ class UIStateRecognizer:
                     phash=phash,
                     confidence=norm_confidence,
                     evidence=signals,
-                    source="live"
+                    source="synthetic_fixture" if simulation else "live"
                 )
             except Exception as e:
                 logger.debug("Auto-record state exception: %s", e)

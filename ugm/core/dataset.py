@@ -43,18 +43,8 @@ class DatasetCollector:
         self.enabled = False
         logger.info("Dataset collection DISABLED.")
 
-    def save_sample(
-        self,
-        image: np.ndarray,
-        tag: str,
-        roi: Optional[NormalizedRect] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        force: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Saves a training sample and JSON metadata if collection is enabled.
-        Sanitizes tag to prevent directory traversal and verifies containment within storage_dir.
-        """
+    @staticmethod
+    def validate_tag(tag: str) -> str:
         if not tag or not isinstance(tag, str):
             raise ValueError("Dataset sample tag must be a non-empty string.")
 
@@ -65,13 +55,38 @@ class DatasetCollector:
         if not sanitized_tag:
             raise ValueError("Dataset sample tag cannot be empty after sanitization")
 
-        if not self.enabled and not force:
-            return {
-                "saved": False,
-                "reason": "Dataset collection is disabled by default. Set UGM_DATASET_COLLECTION=1 or force=True to opt in.",
-                "sample_id": None,
-                "path": None,
-            }
+        return sanitized_tag
+
+    @staticmethod
+    def disabled_result(*, force_allowed: bool) -> Dict[str, Any]:
+        opt_in = "Set UGM_DATASET_COLLECTION=1 in the server environment to opt in."
+        if force_allowed:
+            opt_in += " For an offline fixture, force=True opts in for one sample."
+        return {
+            "saved": False,
+            "reason": f"Dataset collection is disabled by default. {opt_in}",
+            "sample_id": None,
+            "path": None,
+        }
+
+    def save_sample(
+        self,
+        image: np.ndarray,
+        tag: str,
+        roi: Optional[NormalizedRect] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+        *,
+        observation_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Saves a training sample and JSON metadata if collection is enabled.
+        Sanitizes tag to prevent directory traversal and verifies containment within storage_dir.
+        """
+        sanitized_tag = self.validate_tag(tag)
+        force_allowed = observation_source is None or observation_source == "offline_fixture"
+        if not self.enabled and not (force and force_allowed):
+            return self.disabled_result(force_allowed=force_allowed)
 
         os.makedirs(self.storage_dir, exist_ok=True)
 
@@ -83,7 +98,10 @@ class DatasetCollector:
 
         if roi is not None:
             bbox = roi.to_pixel(orig_w, orig_h)
-            crop_img = image[bbox.y:bbox.bottom, bbox.x:bbox.right]
+            # A positive normalized rectangle at the edge may round its
+            # starting coordinate to exactly the width/height on small frames.
+            left, top = min(bbox.x, orig_w - 1), min(bbox.y, orig_h - 1)
+            crop_img = image[top:bbox.bottom, left:bbox.right]
             roi_dict = {
                 "x": roi.x,
                 "y": roi.y,
@@ -108,7 +126,8 @@ class DatasetCollector:
             raise SafetyViolationError(f"Path traversal detected in tag '{tag}'")
 
         # Write image
-        cv2.imwrite(target_img_path, crop_img)
+        if not cv2.imwrite(target_img_path, crop_img):
+            raise OSError("Could not write dataset sample image.")
 
         # Sanitize metadata (remove credentials, system tokens)
         clean_meta = {}
@@ -128,6 +147,9 @@ class DatasetCollector:
             "roi_normalized": roi_dict,
             "metadata": clean_meta,
         }
+
+        if observation_source is not None:
+            record["observation_source"] = observation_source
 
         with open(target_json_path, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
