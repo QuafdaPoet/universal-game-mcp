@@ -108,7 +108,9 @@ def test_hoi4_skill_execution_pause_unpause(mock_engine):
     res = engine.execute_skill("pause_unpause", game_id="hoi4", dry_run=True)
     assert res.success is True
     assert res.status == "success"
-    assert res.steps_executed == 1
+    assert res.dry_run and not res.post_verification_passed
+    assert res.steps_executed == 0 and res.steps_total == 1
+    assert res.step_logs and not res.step_logs[0]["executed"]
     input_ctrl.press_keys.assert_called_with(keys=["space"], duration_ms=50, dry_run=True)
 
 
@@ -119,7 +121,9 @@ def test_hoi4_skill_execution_open_production(mock_engine):
 
     res = engine.execute_skill("open_production", game_id="hoi4", dry_run=True)
     assert res.success is True
-    assert res.steps_executed == 1
+    assert res.dry_run and not res.post_verification_passed
+    assert res.steps_executed == 0 and res.steps_total == 1
+    assert res.step_logs and not res.step_logs[0]["executed"]
     input_ctrl.press_keys.assert_called_with(keys=["y"], duration_ms=60, dry_run=True)
 
 
@@ -130,7 +134,9 @@ def test_hoi4_skill_execution_increase_speed(mock_engine):
 
     res = engine.execute_skill("increase_speed", game_id="hoi4", dry_run=True)
     assert res.success is True
-    assert res.steps_executed == 1
+    assert res.dry_run and not res.post_verification_passed
+    assert res.steps_executed == 0 and res.steps_total == 1
+    assert res.step_logs and not res.step_logs[0]["executed"]
     input_ctrl.press_keys.assert_called_with(keys=["num+"], duration_ms=50, dry_run=True)
 
 
