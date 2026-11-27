@@ -31,7 +31,7 @@ from ugm.core.types import NormalizedRect, WindowInfo
 
 
 def get_current_ram_mb() -> float:
-    """Returns current process RSS memory in MB."""
+    """Returns current process RSS memory in MiB."""
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / (1024 * 1024)
 
@@ -43,7 +43,7 @@ def benchmark_suite():
     print(f"OS: {sys.platform} ({os.name})")
     print(f"CPU Cores (Physical/Logical): {psutil.cpu_count(logical=False)} / {psutil.cpu_count(logical=True)}")
     ram_initial = get_current_ram_mb()
-    print(f"Initial Memory Footprint: {ram_initial:.2f} MB")
+    print(f"Initial RSS: {ram_initial:.2f} MiB")
     print("-" * 70)
 
     # 1. Load 1080p Benchmark Frame
@@ -161,13 +161,13 @@ def benchmark_suite():
     # 6. Memory Profile
     ram_final = get_current_ram_mb()
     print("\n[5/5] Measuring RAM Footprint...")
-    print(f"  Initial Memory: {ram_initial:.2f} MB")
-    print(f"  Peak/Final Memory: {ram_final:.2f} MB")
-    print(f"  Net Memory Delta: {ram_final - ram_initial:.2f} MB")
+    print(f"  Initial RSS: {ram_initial:.2f} MiB")
+    print(f"  Final RSS: {ram_final:.2f} MiB")
+    print(f"  Net RSS Delta: {ram_final - ram_initial:.2f} MiB")
 
     # Summary table
     print("\n" + "=" * 70)
-    print("   BENCHMARK SUMMARY (Ryzen 5 5500U Compatible)")
+    print("   SYNTHETIC COMPONENT BENCHMARK SUMMARY")
     print("=" * 70)
     print(f"| Subsystem                 | Average Latency | Notes                       |")
     print(f"|---------------------------|-----------------|-----------------------------|")
@@ -177,7 +177,7 @@ def benchmark_suite():
     print(f"| ROI Event-driven OCR      | {ocr_roi_avg:8.2f} ms   | PP-OCRv4 CPU (Optimized)    |")
     print(f"| Full-screen OCR           | {ocr_full_time:8.2f} ms   | Not recommended for runtime |")
     print(f"| Visual Diff Verification  | {ver_avg:8.3f} ms   | Fast numpy matrix diff      |")
-    print(f"| Steady State RAM Usage    | {ram_final:8.2f} MB   | Entire stack loaded in RAM  |")
+    print(f"| Final Process RSS          | {ram_final:8.2f} MiB  | No MCP baseline cache  |")
     print("=" * 70)
 
 

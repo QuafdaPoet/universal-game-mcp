@@ -10,7 +10,7 @@ import time
 import re
 import base64
 import logging
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Callable
 import numpy as np
 import cv2
 
@@ -23,9 +23,12 @@ from .types import (
     VisionAgentEscalation,
     ClickResult,
     DetectionItem,
-    OCRItem
+    OCRItem,
+    HoverResult,
+    WindowInfo,
 )
 from .capture import CaptureManager
+from .safety import SafetyViolationError, EmergencyStopTriggered
 from .ocr import BaseOCREngine
 from .icon import IconDetector
 from .input import InputController
@@ -63,7 +66,8 @@ class TargetResolver:
         hover_verification: bool = False,
         expected_tooltip: Optional[str] = None,
         selector_id: Optional[str] = None,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        hover_reader: Optional[Callable[..., HoverResult]] = None,
     ) -> TargetResolution:
         """
         Locates target element, rejects ambiguity, and verifies features.
@@ -171,7 +175,7 @@ class TargetResolver:
                     resolved_cand = None
                     for c in candidates[:3]:  # probe up to top 3
                         nx, ny = c.center_normalized
-                        hover_res = self.verifier.hover_and_read_tooltip(
+                        hover_res = (hover_reader or self.verifier.hover_and_read_tooltip)(
                             norm_x=nx,
                             norm_y=ny,
                             duration_ms=250,
@@ -231,7 +235,7 @@ class TargetResolver:
                 winner.tooltip_text = f"[DRY-RUN] Tooltip simulated for '{expected_tooltip}'"
             else:
                 nx, ny = winner.center_normalized
-                hover_res = self.verifier.hover_and_read_tooltip(
+                hover_res = (hover_reader or self.verifier.hover_and_read_tooltip)(
                     norm_x=nx,
                     norm_y=ny,
                     duration_ms=250,
@@ -295,7 +299,11 @@ class TargetExecutor:
         expected_text: Optional[str] = None,
         verification_roi: Optional[NormalizedRect] = None,
         min_diff_ratio: float = 0.005,
-        timeout_s: float = 5.0
+        timeout_s: float = 5.0,
+        *,
+        target_window: Optional[WindowInfo] = None,
+        scoped_capture: Optional[Callable[[], np.ndarray]] = None,
+        verify: bool = True,
     ) -> ClickResult:
         """
         Executes click on target and verifies that intended visual state change succeeded.
@@ -306,7 +314,7 @@ class TargetExecutor:
 
         # Handle target resolution if provided
         if target_resolution is not None:
-            if target_resolution.status in (TargetStatus.NOT_FOUND.value, TargetStatus.AMBIGUOUS.value, "rejected"):
+            if target_resolution.status not in ("found", TargetStatus.SUCCESS.value):
                 return ClickResult(
                     x_normalized=0.0,
                     y_normalized=0.0,
@@ -343,7 +351,8 @@ class TargetExecutor:
             )
 
         # Step 1: Capture pre-action baseline
-        pre_frame = self.capture_manager.capture(window=win)
+        capture = scoped_capture or (lambda: self.capture_manager.capture(window=win))
+        pre_frame = capture() if verify and not effective_dry_run else None
 
         # Step 2: Dispatch input click
         click_res = self.input_controller.click(
@@ -351,13 +360,17 @@ class TargetExecutor:
             norm_y=norm_y,
             button=button,
             clicks=clicks,
-            dry_run=effective_dry_run
+            dry_run=effective_dry_run,
+            **({"target_window": target_window} if target_window is not None else {}),
         )
 
         if effective_dry_run or click_res.dry_run:
-            click_res.status = TargetStatus.SUCCESS.value
-            click_res.verification_passed = True
-            click_res.evidence = {"dry_run_simulated": True}
+            click_res.verification_passed = False
+            click_res.evidence = {
+                "dry_run_simulated": True,
+                "evidence_level": "simulated",
+                "simulation_accepted": click_res.status == TargetStatus.SUCCESS.value,
+            }
             return click_res
 
         if not click_res.executed:
@@ -365,9 +378,24 @@ class TargetExecutor:
             click_res.status = TargetStatus.FAILED.value
             return click_res
 
+        if not verify:
+            click_res.verification_passed = False
+            click_res.evidence = {"evidence_level": "observed", "verification_skipped": True}
+            return click_res
+
         # Step 3: Wait stabilization interval and capture post-action frame
         time.sleep(0.08)
-        post_frame = self.capture_manager.capture(window=win)
+        try:
+            post_frame = capture()
+        except (SafetyViolationError, EmergencyStopTriggered, RuntimeError) as exc:
+            if scoped_capture is None:
+                raise
+            click_res.status = TargetStatus.FAILED.value
+            click_res.verification_passed = False
+            logger.info("Click verification interrupted after dispatch: %s", exc)
+            click_res.reason = "Click was dispatched, but its post-action capture could not be verified."
+            click_res.evidence = {"evidence_level": "observed", "verification_interrupted": True}
+            return click_res
 
         # Step 4: Verify state change
         ver_res = self.verifier.verify_selection(
@@ -380,6 +408,9 @@ class TargetExecutor:
 
         click_res.verification_passed = ver_res.verified
         click_res.evidence = {
+            "evidence_level": (
+                "verified" if ver_res.verified and (expected_text or min_diff_ratio > 0.0) else "observed"
+            ),
             "diff_ratio": ver_res.diff_ratio,
             "min_diff_required": min_diff_ratio,
             "verification_details": ver_res.details
