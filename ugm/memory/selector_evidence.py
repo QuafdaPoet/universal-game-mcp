@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from hashlib import sha256
 import math
 import re
 import sqlite3
 import time
 import unicodedata
+
+import numpy as np
 
 from ..core.types import NormalizedRect, OCRItem
 from .database import DatabaseManager
@@ -21,6 +24,25 @@ MIN_POSITIVES = 3
 MIN_ATTACHMENTS = 2
 MAX_RECEIPTS_PER_RECIPE = 128
 EVIDENCE_MAX_AGE_S = 30 * 24 * 3600
+
+
+def digest_bgr(frame: np.ndarray) -> str:
+    """Hash the visible BGR pixels, not row padding or discarded alpha."""
+    if (frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3
+            or frame.shape[0] <= 0 or frame.shape[1] <= 0):
+        raise ValueError("Selector evidence requires a non-empty uint8 BGR capture.")
+    rows, columns, _ = frame.shape
+    digest = sha256(f"BGR8:{rows}:{columns}:".encode("ascii"))
+    if frame.flags.c_contiguous:
+        digest.update(memoryview(frame).cast("B"))
+    else:
+        # Native cropped/padded views are common. Copy at most a block of
+        # rows (around 256 KiB), not an additional full-resolution frame.
+        block_rows = max(1, 256 * 1024 // (columns * 3))
+        for start in range(0, rows, block_rows):
+            block = np.ascontiguousarray(frame[start:start + block_rows])
+            digest.update(memoryview(block).cast("B"))
+    return digest.hexdigest()
 
 
 def _normalize_label(label: str) -> str:

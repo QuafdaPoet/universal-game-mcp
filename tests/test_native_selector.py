@@ -109,3 +109,17 @@ def test_failed_precommit_scope_check_rolls_back_entire_receipt(native):
         ledger.record(recipe, Receipt("a"*32, "b"*64, "c"*32, "example", "main_menu", "live_observation"),
                       items, validate_before_commit=reject)
     assert ledger.status(recipe).status == "unseen"
+
+
+@pytest.mark.asyncio
+async def test_native_noncontiguous_bgr_capture_hashes_visible_pixels(native, monkeypatch):
+    ctx, _, _ = native
+    def bgr_from_bgra(*a, **kw):
+        bgra[:, :, 3] += 1
+        return bgra[:, :, :3]
+    bgra = np.zeros((60, 80, 4), dtype=np.uint8)
+    monkeypatch.setattr(ctx.capture_manager, "capture_attached_window", bgr_from_bgra)
+    first = await observe(ctx, record=True)
+    second = await observe(ctx, record=True)
+    assert first["evidence"]["new_receipt"] and not second["evidence"]["new_receipt"]
+    assert second["evidence"]["observations"] == 1

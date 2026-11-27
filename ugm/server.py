@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import base64
-from hashlib import sha256
 import time
 import logging
 import math
@@ -54,7 +53,7 @@ from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
 # V1.5 Subsystems
-from .memory.selector_evidence import Receipt, SelectorEvidenceStore, SelectorRecipe, locate_exact_label
+from .memory.selector_evidence import Receipt, SelectorEvidenceStore, SelectorRecipe, digest_bgr, locate_exact_label
 from .memory.database import DatabaseManager, SIMULATION_DB_SUFFIX
 from .memory.storage import PersistentKnowledgeStorage
 from .navigation.recognizer import UIStateRecognizer, UIStateDetection
@@ -1469,9 +1468,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         match = locate_exact_label(label, ocr.items)
         ledger = SelectorEvidenceStore(ctx.storage.db)
         if record:
-            if not frame.flags.c_contiguous:
-                raise SafetyViolationError("Cannot issue selector evidence for a non-contiguous capture.")
-            digest = sha256(memoryview(frame).cast("B")).hexdigest()
+            digest = digest_bgr(frame)
             ctx.require_observation_scope(scope)
             require_learning_enabled()
             binding = ctx._selector_attachment
