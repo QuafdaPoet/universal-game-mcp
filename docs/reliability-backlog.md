@@ -312,3 +312,13 @@ game's state memory if needed. Clearing or rolling back state memory
 drops provisional records for that game. There is no fallback into
 `navigate_to`, `get_recovery_guidance`, or the legacy recognized states.
 Receipt and scope tests inject capture/OCR; native games remain untested.
+
+The profiler also reports non-overlapping detector preprocessing, ONNX
+execution, and detector postprocessing measurements. The ONNX input tensor
+shape is included, without images or model outputs. In fresh two-thread
+Linux cold trials, the ONNX detector saw `[1,3,736,1216]` for the full
+fixture and `[1,3,736,1376]` for the padded gold crop. Peak RSS rose within
+the ONNX call by ~209 MB and ~252 MB, respectively; preprocessing had
+already increased the peak by ~44 MB and ~50 MB. Both output digests
+matched their previous instrumented baselines. These are point estimates
+on a static simulator, not live-game performance or an allocator trace.

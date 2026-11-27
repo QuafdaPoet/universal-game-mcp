@@ -33,6 +33,7 @@ class StageProbe:
         self.observations.append({
             "stage": self.name, "before": before, "after": after, "elapsed_ms": round(elapsed, 3),
             "peak_increase_bytes": after["os_peak_bytes"] - before["os_peak_bytes"],
+            "input_shape": list(args[0].shape) if args and isinstance(getattr(args[0], "shape", None), tuple) else None,
         })
         return result
 
@@ -42,6 +43,19 @@ def dominant_stage(stages):
     new_peaks = (stage for stage in stages if stage["peak_increase_bytes"] > 0)
     return max(new_peaks, key=lambda stage: stage["peak_increase_bytes"], default=None)
 
+
+
+def instrument_detector(detector, observations, memory):
+    """Trace three non-overlapping steps inside the detection phase."""
+    make_preprocess = detector.get_preprocess
+
+    def make_probe(max_side):
+        operator = make_preprocess(max_side)
+        return StageProbe(operator, "detector_preprocess", observations, memory)
+
+    detector.get_preprocess = make_probe
+    detector.infer = StageProbe(detector.infer, "detector_onnx", observations, memory)
+    detector.postprocess_op = StageProbe(detector.postprocess_op, "detector_postprocess", observations, memory)
 
 def measure(calls, threads, region):
     package = version("rapidocr-onnxruntime")
@@ -60,6 +74,8 @@ def measure(calls, threads, region):
             engine = ctx.ocr_engine
             wrapped = engine._engine
             stages = []
+            detection_stages = []
+            instrument_detector(wrapped.text_det, detection_stages, memory)
             for method, stage in (
                 ("preprocess", "global_resize"),
                 ("maybe_add_letterbox", "letterbox"),
@@ -77,6 +93,7 @@ def measure(calls, threads, region):
             for _ in range(calls):
                 start_phase = memory()
                 stages.clear()
+                detection_stages.clear()
                 frame = ctx.capture_observation()
                 out = engine.read_text(frame, roi=roi, event_tag="profile")
                 geometry = sorted((it.text, it.bbox_normalized.x, it.bbox_normalized.y,
@@ -88,9 +105,12 @@ def measure(calls, threads, region):
                     raise RuntimeError("Repeated fixture OCR text or geometry drifted.")
                 previous_digest = digest
                 peak = dominant_stage(stages)
+                detector_peak = dominant_stage(detection_stages)
                 results.append({
                     "before": start_phase, "after": memory(), "ocr_ms": out.latency_ms,
                     "stages": stages.copy(),
+                    "detector_stages": detection_stages.copy(),
+                    "largest_detector_peak_rise": detector_peak["stage"] if detector_peak is not None else None,
                     "largest_measured_peak_rise": peak["stage"] if peak is not None else None,
                     "output_sha256": digest,
                 })
