@@ -41,6 +41,7 @@ from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolation
 from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.action_scope import NativeActionScope
+from .core.exploration_budget import ExplorationBudget, MAX_SCANS
 from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
@@ -161,6 +162,7 @@ class UGMContext:
         self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
         self._baseline_lock = Lock()
         self._action_lock = Lock()
+        self.exploration_budget = ExplorationBudget()
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -531,12 +533,15 @@ class UGMContext:
 
     def capture_verification_frame(
         self, baseline: Optional[VerificationBaseline] = None, *, game_id: Optional[str] = None,
+        expected_scope: Optional[ObservationScope] = None,
     ) -> tuple[np.ndarray, ObservationScope]:
         current = self.window_manager.current_window
         window = replace(current) if current is not None else None
         scope = self._observation_scope(window)
         if not scope.fixture and window is not None and game_id is not None and game_id != scope.native_game_id:
             raise SafetyViolationError("Requested game_id does not match the attached game.")
+        if expected_scope is not None and scope != expected_scope:
+            raise SafetyViolationError("Exploration session scope changed; start a new session.")
         if baseline is not None and (baseline.scope != scope or not baseline.is_fresh()):
             raise InvalidVerificationBaseline()
         frame = self._capture_observation_for_window(window)
@@ -1351,12 +1356,17 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         scan_mode: str = "all",
         goal: Optional[str] = None,
         max_results: Annotated[int, Field(ge=1, le=MAX_RESULTS)] = 6,
+        session_scan_budget: Annotated[Optional[int], Field(ge=1, le=MAX_SCANS)] = None,
+        exploration_session_id: Annotated[Optional[str], Field(min_length=32, max_length=32)] = None,
     ) -> Dict[str, Any]:
         """
         Scans a scoped game client or fixture for UI candidates.
         With goal, return bounded OCR label matches for an external agent to interpret.
         Goal mode is read-only, never dispatches input, and does not establish
-        whether a label is interactive. Use text labels, not a long instruction.
+        whether a label is interactive. Set session_scan_budget to start a
+        bounded session; pass session.id as exploration_session_id on later
+        goal scans instead of setting a new budget. Use text labels, not a
+        long instruction.
         """
         norm_roi = _parse_observation_roi(roi, "Exploration")
         if scan_mode not in {"all", "text", "shapes", "buttons"}:
@@ -1364,11 +1374,30 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         terms = validate_goal(goal) if goal is not None else None
         if terms is not None and scan_mode == "shapes":
             raise ValueError("Exploration goal mode needs text; shapes-only mode is unsupported.")
-        frame, scope = ctx.capture_verification_frame()
-        candidates = ctx.explorer.discover_interactive_elements(
-            frame, roi=norm_roi, scan_mode="text" if terms is not None else scan_mode,
-        )
-        ctx.require_observation_scope(scope)
+        use_session = session_scan_budget is not None or exploration_session_id is not None
+        if use_session and terms is None:
+            raise ValueError("Exploration sessions require a goal.")
+        if session_scan_budget is not None and exploration_session_id is not None:
+            raise ValueError("Provide a new exploration budget or a session ID, not both.")
+        expected_scope = None
+        session_id = None
+        session_data = None
+        if use_session:
+            expected_scope = ctx._observation_scope(ctx.window_manager.current_window)
+            session_id = ctx.exploration_budget.reserve(expected_scope, exploration_session_id, session_scan_budget)
+        success = False
+        try:
+            frame, scope = ctx.capture_verification_frame(expected_scope=expected_scope)
+            candidates = ctx.explorer.discover_interactive_elements(
+                frame, roi=norm_roi, scan_mode="text" if terms is not None else scan_mode,
+            )
+            ctx.require_observation_scope(scope)
+            success = True
+        finally:
+            if session_id is not None:
+                session_data = ctx.exploration_budget.finish(
+                    session_id, discard=not success and exploration_session_id is None,
+                )
         if terms is not None:
             if scope.fixture:
                 source = "offline_fixture"
@@ -1381,6 +1410,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 "count": len(matches), "candidates": matches, "scan_mode": "text",
                 "goal": goal, "total_matches": total, "truncated": total > max_results,
                 "observation_source": source,
+                **({"session": session_data} if session_data is not None else {}),
             }
         return {
             "count": len(candidates),

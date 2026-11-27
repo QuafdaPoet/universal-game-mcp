@@ -170,3 +170,17 @@ the same native scope; use the explicit offline fixture for headless work.
 Fixture behavior and storage remain separate. These checks are cooperative:
 they cannot make desktop input dispatch atomic with OS focus changes or
 replace Windows real-game testing.
+
+### Opt-in exploration scan quota
+
+Start a read-only goal session with
+`explore_interactive_elements({"goal":"production","session_scan_budget":4})`.
+Use the returned `session.id` as `exploration_session_id` for later goal scans.
+Each accepted attempt consumes one scan before capture, even if OCR fails.
+`session.scans_remaining` indicates when to stop. Simultaneous continuation
+of the same session is refused. The same attachment and backend must remain
+in use. A session expires for new scans after ten minutes; the server holds
+at most eight session records and accepts at most 16 scans each. Sessions
+do not survive a process restart and never write gameplay evidence.
+This is a cooperative budget for clients using that ID, not a global limit
+on legacy calls or starting new sessions, nor a hard OCR wall-clock timeout.
