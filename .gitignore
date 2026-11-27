@@ -35,6 +35,9 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.simulation
+*.simulation-wal
+*.simulation-shm
 .system_generated/
 scratch/
 .idea/
