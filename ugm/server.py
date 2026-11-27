@@ -42,6 +42,7 @@ from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.action_scope import NativeActionScope
 from .core.exploration_budget import ExplorationBudget, MAX_SCANS
+from .core import state_triage
 from .core.ocr import RapidOCREngine, BaseOCREngine, MockOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
@@ -1104,6 +1105,49 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             record_observation=not ctx.input_controller.is_dry_run_active() or ctx.simulation_session,
         )
         return det.to_dict()
+
+    @server.tool()
+    @serial_action
+    def triage_ui_state(game_id: Optional[str] = None) -> Dict[str, Any]:
+        """Inspect an unknown UI without guessing a state or taking an action.
+
+        Exactly two same-scope snapshots. Returned labels are observations,
+        not instructions, selectors, or evidence that a route is safe.
+        """
+        def snapshot(expected_scope: Optional[ObservationScope] = None):
+            frame, observed_scope = ctx.capture_verification_frame(
+                game_id=game_id, expected_scope=expected_scope,
+            )
+            ocr = ctx.ocr_engine.read_text(frame, event_tag="ui_state_triage")
+            result = state_triage.summarize(frame, ocr.items)
+            ctx.require_observation_scope(observed_scope)
+            return result, observed_scope
+
+        first, scope = snapshot()
+        time.sleep(.12)
+        second, _ = snapshot(scope)
+        anchors, visual_delta = state_triage.compare(first, second)
+        ctx.require_observation_scope(scope)
+        if scope.fixture:
+            source = "offline_fixture"
+        elif scope.simulation or ctx.input_controller.is_dry_run_active():
+            source = "dry_run_observation"
+        elif isinstance(ctx.ocr_engine, MockOCREngine):
+            source = "mock_ocr"
+        else:
+            source = "live_observation"
+        return {
+            "game_id": scope.native_game_id or game_id or ctx.active_game_id,
+            "state_name": "unknown",
+            "source": source,
+            "samples": 2,
+            "status": "stable_candidate" if anchors else "insufficient_evidence",
+            "anchors": anchors,
+            "thumbnail_delta": round(visual_delta, 2),
+            "action_suggested": False,
+            "next_step": "Inspect the recurring labels in context." if anchors else
+                         "Wait for the display to settle before observing again.",
+        }
 
     # 13. memory_search
     @server.tool()

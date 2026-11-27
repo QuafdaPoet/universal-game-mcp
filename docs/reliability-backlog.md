@@ -224,3 +224,16 @@ and OCR. Native Windows capture and real games still need validation. The
 selector still requires a unique match on the fresh image, even if the
 ledger says `repeat_observed`. The smoke test and the general 250 MB peak
 target are separate gates.
+
+### Unknown-state triage
+
+When classification is unknown, `triage_ui_state` can inspect two fresh
+same-attachment snapshots. A small grayscale thumbnail must agree and at
+least two unique OCR labels must recur at approximately the same location.
+At most six normalized labels are returned; numeric counters, duplicate
+labels and low-confidence matches do not qualify. The labels are untrusted
+observations, not instructions. Even a stable result keeps state
+`unknown`: no input, persistent state, coordinates, verified route, or
+selector is created. An attachment/backend change fails the call. The
+normal navigation gate remains in force. This is bounded guidance, not
+automatic recovery or proof of generalization to a real game.
