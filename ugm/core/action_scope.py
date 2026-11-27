@@ -16,6 +16,7 @@ class ActionScopeInterrupted(SafetyViolationError):
 class NativeActionScope:
     validate_window: Callable[[], WindowInfo]
     capture_window: Callable[[WindowInfo], np.ndarray]
+    can_record_native_proof: bool = False
 
     def require_window(self) -> WindowInfo:
         try:

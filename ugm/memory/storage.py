@@ -30,6 +30,7 @@ from ..core.safety import SafetyViolationError
 from .transition_quarantine import get_quarantined_transitions, quarantine_transition, transition_identity
 
 logger = logging.getLogger("ugm.memory.storage")
+_RECOVERY_EVIDENCE_MAX_AGE_S = 30 * 86400
 
 
 @dataclass
@@ -255,7 +256,9 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
         now = time.time()
         key = transition_identity(from_state, to_state, action_type, params)
         param_str = key[-1]
-        ev_str = json.dumps(evidence or {})
+        observed = dict(evidence or {})
+        for key_name in ("native_success_streak", "native_success_at", "previous_native_success_at"):
+            observed.pop(key_name, None)
 
         if is_execution_error:
             # Execution error (transient OS / window glitch) does NOT penalize transition knowledge
@@ -263,12 +266,29 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
             return
 
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute("""
-                SELECT id, success_count, fail_count, confidence, status, consecutive_failures
+                SELECT id, success_count, fail_count, confidence, status, consecutive_failures, evidence, source, updated_at
                 FROM navigation_transitions
                 WHERE game_id = ? AND from_state = ? AND to_state = ? AND action_type = ? AND params = ?
             """, (game_id, from_state, to_state, action_type, param_str))
             row = cur.fetchone()
+            if (
+                not self.db.simulation and success and source == "live"
+                and observed.get("producer") == "scoped_native_navigation"
+                and observed.get("evidence_level") == "verified"
+                and observed.get("observed_state") == to_state
+            ):
+                previous = {}
+                if (row and row["source"] == "live"
+                        and 0 <= now - row["updated_at"] <= _RECOVERY_EVIDENCE_MAX_AGE_S):
+                    previous = json.loads(row["evidence"] or "{}")
+                previous_at = previous.get("native_success_at") if isinstance(previous, dict) else None
+                observed["native_success_at"] = now
+                if type(previous_at) in (int, float) and 0 <= now - previous_at <= _RECOVERY_EVIDENCE_MAX_AGE_S:
+                    observed["previous_native_success_at"] = previous_at
+            ev_str = json.dumps(observed)
+
 
             if not row:
                 init_status = status or ("verified" if success else "candidate")
@@ -397,6 +417,40 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 consecutive_failures=r["consecutive_failures"] if "consecutive_failures" in r.keys() else 0
             ))
         return results
+
+    def recovery_destinations(self, game_id: str, state_name: str, limit: int = 4) -> list[str]:
+        """Get only bounded same-game destinations with recent scoped native proof."""
+        if self.db.simulation or not 1 <= limit <= 4:
+            return []
+        now = time.time()
+        conn = self.db.get_connection()
+        rows = conn.execute("""
+            SELECT t.to_state
+            FROM navigation_transitions t
+            WHERE t.game_id = ? AND t.from_state = ? AND t.to_state != t.from_state
+              AND lower(trim(t.to_state)) NOT IN ('unknown', 'ambiguous', '')
+              AND t.status = 'verified' AND t.source = 'live' AND t.confidence >= .8
+              AND t.consecutive_failures = 0
+              AND t.action_type IN ('press_keys', 'click_target')
+              AND CASE WHEN json_valid(t.evidence) THEN
+                    json_extract(t.evidence, '$.producer') = 'scoped_native_navigation'
+                AND json_extract(t.evidence, '$.evidence_level') = 'verified'
+                AND json_extract(t.evidence, '$.observed_state') = t.to_state
+                AND json_type(t.evidence, '$.previous_native_success_at') IN ('integer', 'real')
+                AND json_extract(t.evidence, '$.previous_native_success_at') BETWEEN ? AND ?
+                AND json_extract(t.evidence, '$.native_success_at')
+                    BETWEEN json_extract(t.evidence, '$.previous_native_success_at') AND ?
+              ELSE 0 END
+              AND NOT EXISTS (
+                  SELECT 1 FROM transition_quarantine q
+                  WHERE (q.game_id, q.from_state, q.to_state, q.action_type, q.params)
+                      = (t.game_id, t.from_state, t.to_state, t.action_type, t.params)
+              )
+            GROUP BY t.to_state
+            ORDER BY MIN(t.cost), t.to_state
+            LIMIT ?
+        """, (game_id, state_name, now - _RECOVERY_EVIDENCE_MAX_AGE_S, now, now, limit))
+        return [row["to_state"] for row in rows]
 
     # ---------------------------------------------------------
     # Action History

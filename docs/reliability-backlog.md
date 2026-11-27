@@ -250,3 +250,26 @@ coordinates, input, route parameters, legacy concept descriptions, or
 verified state are transferred. The legacy concept query remains unchanged
 for compatibility. No game-specific skill pack or new persistent record
 is required for this candidate check.
+
+### Recovery destinations after recognition
+
+`get_recovery_guidance` returns up to four historical candidate
+destinations, not routes or controls. Both fresh scoped native readings
+must agree on a known state with at least 0.80 confidence and a stable
+thumbnail. It declines fixture, dry-run, mock OCR, unknown or ambiguous
+readings. The durable query requires a same-game verified edge, no
+quarantine, the most recent result observed in the expected destination,
+and two consecutive successful scoped native attempts within the
+30-day evidence window. Imported and curated entries do not qualify by
+default. A failure or an observation without scoped proof resets the
+streak. No action or memory write occurs when asking for guidance; a
+separate action would require a fresh check. No recovery evidence is
+inferred from unknown screen triage. Real-game validation remains open.
+
+The Windows observation smoke script now accepts optional
+`--expect-anchor "Settings"` if that exact normalized label is visible
+in both captures. Expect at least two unambiguous recurring labels.
+Use the game's current language and keep a static offline game menu
+focused for the countdown. The check does not launch the game, request
+input, or verify transitions. It is optional because a title screen
+with fewer than two independently readable labels cannot pass triage.

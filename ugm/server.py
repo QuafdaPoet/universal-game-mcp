@@ -534,7 +534,10 @@ class UGMContext:
                 raise SafetyViolationError("No game window attached.")
             return observed
 
-        bound = NativeActionScope(validate, self._capture_observation_for_window)
+        bound = NativeActionScope(
+            validate, self._capture_observation_for_window,
+            can_record_native_proof=not self.simulation_session and not isinstance(self.ocr_engine, MockOCREngine),
+        )
         return game_id_for_window(bound.require_window()), bound
 
     def capture_verification_frame(
@@ -1148,6 +1151,49 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             "next_step": "Inspect the recurring labels in context." if anchors else
                          "Wait for the display to settle before observing again.",
         }
+
+    @server.tool()
+    @serial_action
+    def get_recovery_guidance(game_id: Optional[str] = None) -> Dict[str, Any]:
+        """List advisory destinations from a confirmed, stable native UI state.
+
+        No unknown-state guesses, action parameters, graph mutation or input.
+        Recheck the current screen before any later, separate action request.
+        """
+        def require_live() -> None:
+            if (ctx._offline_fixture_configured or ctx.simulation_session or ctx.storage.db.simulation
+                    or ctx.input_controller.is_dry_run_active()):
+                raise SafetyViolationError("Recovery guidance is unavailable in fixture or dry-run mode.")
+            if isinstance(ctx.ocr_engine, MockOCREngine):
+                raise SafetyViolationError("Recovery guidance requires real OCR.")
+
+        def observe(expected_scope: Optional[ObservationScope] = None):
+            frame, scope = ctx.capture_verification_frame(game_id=game_id, expected_scope=expected_scope)
+            detection = ctx.state_recognizer.recognize_state(
+                frame, game_id=scope.native_game_id, simulation=False, record_observation=False,
+            )
+            thumbnail = state_triage.summarize(frame, []).thumbnail
+            ctx.require_observation_scope(scope)
+            state = detection.state_name
+            valid = (detection.status == "known" and .8 <= detection.confidence <= 1.0
+                     and isinstance(state, str) and state.strip().casefold() not in {"unknown", "ambiguous", ""})
+            return (state if valid else None), thumbnail, scope
+
+        require_live()
+        first, sample1, scope = observe()
+        base = {"game_id": scope.native_game_id, "state_name": "unknown", "action_suggested": False}
+        if first is None:
+            return {**base, "status": "insufficient_state_evidence", "destinations": []}
+        time.sleep(.12)
+        second, sample2, _ = observe(scope)
+        require_live()
+        if first != second or cv2.absdiff(sample1, sample2).mean() > state_triage.MAX_VISUAL_DELTA:
+            return {**base, "status": "insufficient_state_evidence", "destinations": []}
+
+        destinations = ctx.storage.recovery_destinations(scope.native_game_id, second)
+        ctx.require_observation_scope(scope)
+        return {**base, "state_name": second, "destinations": destinations,
+                "status": "candidate_destinations" if destinations else "no_verified_destinations"}
 
     # 13. memory_search
     @server.tool()

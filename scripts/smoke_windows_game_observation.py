@@ -19,6 +19,22 @@ def normalize(text):
     return " ".join(text.casefold().split())
 
 
+
+def validate_native_triage(result, expected_anchor):
+    """Require transient, read-only evidence from a focused native window."""
+    labels = result.get("anchors")
+    if (result.get("source") != "dry_run_observation" or result.get("samples") != 2
+            or result.get("state_name") != "unknown" or result.get("status") != "stable_candidate"
+            or result.get("action_suggested") is not False
+            or any(k in result for k in ("route", "coordinates", "destinations", "action"))
+            or not isinstance(labels, list) or not 2 <= len(labels) <= 6
+            or not all(isinstance(label, str) and normalize(label) for label in labels)):
+        raise RuntimeError("Native read-only triage did not produce two stable observations.")
+    unique = {normalize(label) for label in labels}
+    if len(unique) != len(labels) or normalize(expected_anchor) not in unique:
+        raise RuntimeError("Expected persistent UI anchor was missing or ambiguous.")
+    return len(labels)
+
 async def check(args, db_path):
     params = StdioServerParameters(
         command=sys.executable,
@@ -63,9 +79,14 @@ async def check(args, db_path):
                 ocr = await call("read_text", {})
                 if normalize(args.expect_text) not in normalize(ocr.get("full_text", "")):
                     raise RuntimeError(f"Expected text not found; OCR returned {ocr.get('count', 0)} items.")
+                triage_note = ""
+                if args.expect_anchor:
+                    native_triage = await call("triage_ui_state", {})
+                    triage_count = validate_native_triage(native_triage, args.expect_anchor)
+                    triage_note = f"{triage_count} repeated native OCR anchors; "
                 print(f"PASS: UGM {initialization.server_info.version}; "
                       f"{args.process} client {image['width']}x{image['height']}; "
-                      "OCR marker matched; no hardware input requested.")
+                      f"OCR marker matched; {triage_note}no hardware input requested.")
 
 
 def main():
@@ -73,12 +94,16 @@ def main():
     parser.add_argument("--process", required=True, help="Exact game executable basename, e.g. hoi4.exe")
     parser.add_argument("--title", required=True, help="Literal window title (or stable substring)")
     parser.add_argument("--expect-text", required=True, help="Visible static label, in the game's current language")
+    parser.add_argument("--expect-anchor", help="Optionally require a stable label from both read-only triage captures")
     parser.add_argument("--focus-delay", type=int, default=5, choices=range(0, 31), metavar="0..30")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("This interactive live-game check requires Windows.")
     if not re.fullmatch(r"[^\\/:]+\.exe", args.process, re.IGNORECASE) or not normalize(args.title) or not normalize(args.expect_text):
         parser.error("Supply an executable basename and non-empty title and OCR marker.")
+
+    if args.expect_anchor is not None and not normalize(args.expect_anchor):
+        parser.error("--expect-anchor must not be blank.")
 
     async def run():
         print(f"Switch to the offline game within {args.focus_delay} seconds and leave it focused.", flush=True)

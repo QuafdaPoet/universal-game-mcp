@@ -313,6 +313,9 @@ class UINavigator:
                 evidence={
                     "evidence_level": "verified" if step_verified else "observed",
                     "observed_state": observed_state,
+                    **({"producer": "scoped_native_navigation"} if action_scope and action_scope.can_record_native_proof
+                       and step_verified and .8 <= post_det.confidence <= 1.0 and edge.trigger_action in {"press_keys", "click_target"}
+                       and not self.input_controller.is_dry_run_active() else {}),
                 },
                 is_execution_error=False,
             )
