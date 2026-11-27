@@ -52,7 +52,12 @@ class RapidOCREngine(BaseOCREngine):
     ):
         self.min_score = min_score
         self.use_cls = use_cls
+        if intra_op_threads != -1 and intra_op_threads < 1:
+            raise ValueError('intra_op_threads must be -1 (automatic) or positive')
         self.intra_op_threads = intra_op_threads
+        self.effective_intra_op_threads = (
+            -1 if intra_op_threads == -1 else min(intra_op_threads, os.cpu_count() or 1)
+        )
         self._engine = None
         self._init_engine()
 
@@ -62,9 +67,11 @@ class RapidOCREngine(BaseOCREngine):
             # Passing use_cls=False speeds up game UI OCR significantly
             self._engine = RapidOCR(
                 use_cls=self.use_cls,
-                text_score=self.min_score
+                text_score=self.min_score,
+                intra_op_num_threads=self.effective_intra_op_threads,
             )
-            logger.info("RapidOCREngine initialized with use_cls=%s", self.use_cls)
+            logger.info("RapidOCREngine initialized with use_cls=%s, intra_op_num_threads=%s",
+                        self.use_cls, self.effective_intra_op_threads)
         except Exception as e:
             logger.error("Failed to initialize RapidOCR: %s", e)
             self._engine = None
