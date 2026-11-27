@@ -104,3 +104,19 @@ def test_ocr_engine_factory():
 
     with pytest.raises(ValueError, match="Unknown OCR backend"):
         get_ocr_engine("unsupported_backend_xyz")
+
+
+@pytest.mark.parametrize("factory, options, expected", [
+    (RapidOCREngine, {}, 4),
+    (RapidOCRLiteEngine, {}, 2),
+    (RapidOCREngine, {"intra_op_threads": -1}, -1),
+    (RapidOCREngine, {"intra_op_threads": 8}, 4),
+])
+def test_rapidocr_passes_supported_thread_count(monkeypatch, factory, options, expected):
+    import rapidocr_onnxruntime
+
+    received = {}
+    monkeypatch.setattr("ugm.core.ocr.os.cpu_count", lambda: 4)
+    monkeypatch.setattr(rapidocr_onnxruntime, "RapidOCR", lambda **kwargs: received.update(kwargs))
+    factory(**options)
+    assert received == {"use_cls": False, "text_score": 0.50, "intra_op_num_threads": expected}
