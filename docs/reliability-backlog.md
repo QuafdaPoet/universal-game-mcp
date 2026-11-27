@@ -273,3 +273,21 @@ Use the game's current language and keep a static offline game menu
 focused for the countdown. The check does not launch the game, request
 input, or verify transitions. It is optional because a title screen
 with fewer than two independently readable labels cannot pass triage.
+
+### Cold OCR phase profiling
+
+Run each arm in a fresh process using pinned RapidOCR 1.4.4:
+
+```sh
+python -m scripts.benchmark_ocr_pipeline --calls 1 --threads 2 --region full
+python -m scripts.benchmark_ocr_pipeline --calls 1 --threads 2 --region gold
+```
+
+Use `--calls 4` for repeat behavior. The diagnostic samples working-set
+current and high-water bytes around the image resize, letterbox, detection,
+crop and recognition stages. Only the diagnostic process wraps methods; the
+production OCR path and result remain unchanged. This uses a fixture image
+and direct OCR call, not MCP timing, game observation, or an allocator
+trace. A phase can make allocations without increasing the existing OS
+high-water mark. A robust memory reduction must preserve small text and
+geometry; ROI speed alone does not establish the peak RAM target.

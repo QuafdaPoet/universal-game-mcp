@@ -63,6 +63,13 @@ jobs:
           python -m scripts.benchmark_mcp_capture_memory --width 3840 --ocr-threads 2 --ocr-region gold
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Isolate cold OCR stages on the simulator fixture
+        run: |
+          foreach ($region in "full", "gold") {
+            python -m scripts.benchmark_ocr_pipeline --calls 1 --threads 2 --region $region
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Run End-to-End Offline Simulator Demo
         run: |
           python scripts/demo_offline_sim.py
