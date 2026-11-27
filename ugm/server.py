@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import base64
+from hashlib import sha256
 import time
 import logging
 import math
@@ -42,7 +43,7 @@ from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.action_scope import NativeActionScope
 from .core.exploration_budget import ExplorationBudget, MAX_SCANS
-from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
+from .core.ocr import RapidOCREngine, BaseOCREngine, MockOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
 from .core.verifier import ActionVerifier
@@ -53,6 +54,7 @@ from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
 # V1.5 Subsystems
+from .memory.selector_evidence import Receipt, SelectorEvidenceStore, SelectorRecipe, locate_exact_label
 from .memory.database import DatabaseManager, SIMULATION_DB_SUFFIX
 from .memory.storage import PersistentKnowledgeStorage
 from .navigation.recognizer import UIStateRecognizer, UIStateDetection
@@ -163,6 +165,10 @@ class UGMContext:
         self._baseline_lock = Lock()
         self._action_lock = Lock()
         self.exploration_budget = ExplorationBudget()
+        self._semantic_selector_learning = os.environ.get("UGM_SEMANTIC_SELECTOR_LEARNING") == "1"
+        # Accessed only under the action lease; a backend switch does not turn
+        # the same attachment into a second independent observing session.
+        self._selector_attachment: tuple[int, str] | None = None
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -1416,6 +1422,78 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             "count": len(candidates),
             "candidates": [c.to_dict() for c in candidates],
             "scan_mode": scan_mode
+        }
+
+    @server.tool()
+    @serial_action
+    def observe_ui_selector(
+        selector_id: Annotated[str, Field(min_length=1, max_length=128)],
+        label: Annotated[str, Field(min_length=1, max_length=160)],
+        record: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a unique OCR label in a known native UI state. No input is dispatched.
+
+        Optional recording is disabled by default. Repeated observations do not
+        prove interactivity or grant permission to click.
+        """
+        # Validate caller data before native capture, independently of state.
+        SelectorRecipe("validation", "validation", selector_id, label).validated()
+
+        def require_learning_enabled() -> None:
+            if not ctx._semantic_selector_learning:
+                raise SafetyViolationError("Recording selector observations is disabled.")
+            if (ctx.simulation_session or ctx.storage.db.simulation
+                    or ctx.input_controller.is_dry_run_active(None)):
+                raise SafetyViolationError("Selector recording is unavailable in fixture or dry-run mode.")
+            if isinstance(ctx.ocr_engine, MockOCREngine):
+                raise SafetyViolationError("Selector recording requires a real OCR backend.")
+
+        if record:
+            require_learning_enabled()
+        if ctx._offline_fixture_configured:
+            raise SafetyViolationError("Selector observations need an attached native game.")
+        frame, scope = ctx.capture_verification_frame()
+        game_id = scope.native_game_id
+        if not game_id:
+            raise SafetyViolationError("Selector observations need an identified native game.")
+        detection = ctx.state_recognizer.recognize_state(
+            frame, game_id=game_id, simulation=scope.simulation, record_observation=False,
+        )
+        ctx.require_observation_scope(scope)
+        if detection.status != "known" or not .80 <= detection.confidence <= 1.0:
+            return {"game_id": game_id, "match": "unknown_state", "interactivity_verified": False}
+
+        recipe = SelectorRecipe(game_id, detection.state_name, selector_id, label)
+        recipe.validated()
+        ocr = ctx.ocr_engine.read_text(frame, event_tag="semantic_selector")
+        match = locate_exact_label(label, ocr.items)
+        ledger = SelectorEvidenceStore(ctx.storage.db)
+        if record:
+            if not frame.flags.c_contiguous:
+                raise SafetyViolationError("Cannot issue selector evidence for a non-contiguous capture.")
+            digest = sha256(memoryview(frame).cast("B")).hexdigest()
+            ctx.require_observation_scope(scope)
+            require_learning_enabled()
+            binding = ctx._selector_attachment
+            if binding is None or binding[0] != scope.attachment_revision:
+                binding = (scope.attachment_revision, uuid4().hex)
+                ctx._selector_attachment = binding
+            def validate_before_commit() -> None:
+                ctx.require_observation_scope(scope)
+                require_learning_enabled()
+
+            evidence = ledger.record(
+                recipe, Receipt(uuid4().hex, digest, binding[1], game_id, detection.state_name,
+                                "live_observation"), ocr.items,
+                validate_before_commit=validate_before_commit,
+            )
+        else:
+            evidence = ledger.status(recipe)
+        ctx.require_observation_scope(scope)
+        return {
+            "game_id": game_id, "state_name": detection.state_name, "selector_id": selector_id,
+            "match": match.status, "bbox_normalized": asdict(match.box) if match.box is not None else None,
+            "evidence": asdict(evidence), "interactivity_verified": False,
         }
 
     # 24. probe_action

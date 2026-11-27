@@ -5,7 +5,7 @@ module intentionally does not accept serialized MCP receipts or goal IDs.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 import math
 import re
@@ -152,6 +152,7 @@ class SelectorEvidenceStore:
 
     def record(
         self, recipe: SelectorRecipe, receipt: Receipt, items: Iterable[OCRItem],
+        *, validate_before_commit: Callable[[], None] | None = None,
     ) -> EvidenceStatus:
         if self.db.simulation:
             raise ValueError("Live selector evidence cannot be written to a simulation database.")
@@ -184,4 +185,7 @@ class SelectorEvidenceStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (*key, receipt.receipt_id, receipt.capture_sha256,
                   receipt.attachment_token, receipt.source, result.status, now))
-            return replace(self._status(conn, key, label, now), new_receipt=True)
+            updated = replace(self._status(conn, key, label, now), new_receipt=True)
+            if validate_before_commit is not None:
+                validate_before_commit()
+            return updated

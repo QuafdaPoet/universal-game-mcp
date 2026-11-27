@@ -205,3 +205,22 @@ with fake data; they are not recordings of a real game. The next gate is
 a server-issued receipt from a fresh scoped capture of a known screen,
 with fixture/dry-run/default-off isolation. A repeated OCR observation
 does not grant input authority, even after that gate.
+
+#### Native observation adapter
+
+`observe_ui_selector({"selector_id":"production","label":"Production"})`
+does one fresh **read-only** native observation. It requires a known state
+from the same frame and returns the current exact-match box, never a cached
+click location. For an explicit observation to update the ledger, start UGM
+with `UGM_SEMANTIC_SELECTOR_LEARNING=1` and set `record:true`. Recording
+refuses fixture, mock OCR, simulation storage, and dry-run. Game, state,
+frame digest and attachment token all come from the server. Scope is checked
+again inside the transaction. One new frame per call is eligible; recapturing
+identical pixels does not add evidence. This API never sends input, does not
+infer game rules, and intentionally does not resolve unknown UI states yet.
+
+This adapter is tested via the real MCP call path with injected captures
+and OCR. Native Windows capture and real games still need validation. The
+selector still requires a unique match on the fresh image, even if the
+ledger says `repeat_observed`. The smoke test and the general 250 MB peak
+target are separate gates.
