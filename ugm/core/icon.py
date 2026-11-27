@@ -102,6 +102,11 @@ class IconDetector:
             raise FileNotFoundError(f"Icon template image not found: {file_path}")
         self.register_template(name, img)
 
+    def alias_template(self, name: str, source: str) -> None:
+        """Register another name for a template without allocating another image."""
+        self._templates[name] = self._templates[source]
+        self._masks[name] = self._masks.get(source)
+
     def locate_icon(
         self,
         image: np.ndarray,
