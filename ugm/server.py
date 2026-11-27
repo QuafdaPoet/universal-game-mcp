@@ -40,13 +40,14 @@ from .core.types import (
 from .core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
 from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
+from .core.action_scope import NativeActionScope
 from .core.ocr import RapidOCREngine, BaseOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
 from .core.verifier import ActionVerifier
 from .core.dataset import DatasetCollector
 from .core.semantic_discovery import validate_goal, grounded_matches, MAX_RESULTS
-from .core.target import TargetResolver, TargetExecutor
+from .core.target import TargetResolver, TargetExecutor, scoped_template_name
 from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
@@ -192,6 +193,7 @@ class UGMContext:
                         if os.path.isfile(tmpl_path):
                             try:
                                 self.icon_detector.load_template_file(sel_id, tmpl_path)
+                                self.icon_detector.alias_template(scoped_template_name(pack.game_id, sel_id), sel_id)
                             except Exception:
                                 pass
             except Exception as e:
@@ -507,14 +509,25 @@ class UGMContext:
         self.capture_manager.require_attached_window(self.window_manager, window)
         return window
 
-    def action_game_id(self, requested: Optional[str], dry_run: bool) -> str:
-        window = self.bound_action_window(dry_run)
-        if window is None:
-            return requested or self.active_game_id or "hoi4"
-        identified = game_id_for_window(window)
-        if requested is not None and requested != identified:
+    def open_action_scope(
+        self, requested: Optional[str],
+    ) -> tuple[str, Optional[NativeActionScope]]:
+        if self._offline_fixture_configured:
+            return requested or self.active_game_id or "hoi4", None
+        current = self.window_manager.current_window
+        window = replace(current) if current is not None else None
+        scope = self._observation_scope(window)
+        if requested is not None and scope.native_game_id is not None and requested != scope.native_game_id:
             raise SafetyViolationError("Requested game_id does not match the attached game.")
-        return identified
+
+        def validate() -> WindowInfo:
+            observed = self.require_observation_scope(scope)
+            if observed is None:
+                raise SafetyViolationError("No game window attached.")
+            return observed
+
+        bound = NativeActionScope(validate, self._capture_observation_for_window)
+        return game_id_for_window(bound.require_window()), bound
 
     def capture_verification_frame(
         self, baseline: Optional[VerificationBaseline] = None, *, game_id: Optional[str] = None,
@@ -1169,13 +1182,14 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Safely navigates the game interface from current state to target destination state.
         Verifies resulting state after every single step and replans or halts safely on failure.
         """
-        target_game_id = ctx.action_game_id(game_id, dry_run)
+        target_game_id, scope = ctx.open_action_scope(game_id)
         navigator = ctx.get_navigator(target_game_id)
         res = navigator.navigate_to(
             target_state=target_state,
             game_id=target_game_id,
             max_retries=max_retries,
-            dry_run=dry_run
+            dry_run=dry_run,
+            action_scope=scope,
         )
         return res.to_dict()
 
@@ -1194,12 +1208,13 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Dry-run success only means the steps were accepted, not executed or verified.
         An actual postcondition match is indicated by post_verification_passed.
         """
-        target_game_id = ctx.action_game_id(game_id, dry_run)
+        target_game_id, scope = ctx.open_action_scope(game_id)
         res = ctx.skill_engine.execute_skill(
             skill_id=skill_id,
             game_id=target_game_id,
             params=params,
-            dry_run=dry_run
+            dry_run=dry_run,
+            action_scope=scope,
         )
         return res.to_dict()
 

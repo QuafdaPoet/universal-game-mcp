@@ -37,6 +37,10 @@ from .verifier import ActionVerifier
 logger = logging.getLogger("ugm.target")
 
 
+def scoped_template_name(game_id: str, selector_id: str) -> str:
+    return f"game:{len(game_id)}:{game_id}:{selector_id}"
+
+
 class TargetResolver:
     """
     Locates and disambiguates UI targets across visual features and text.
@@ -52,7 +56,7 @@ class TargetResolver:
         self.icon_detector = icon_detector
         self.ocr_engine = ocr_engine
         self.verifier = verifier
-        self.skill_packs: Dict[str, Any] = skill_packs or {}
+        self.skill_packs: Dict[str, Any] = skill_packs if skill_packs is not None else {}
 
     def resolve_target(
         self,
@@ -68,6 +72,7 @@ class TargetResolver:
         selector_id: Optional[str] = None,
         dry_run: Optional[bool] = None,
         hover_reader: Optional[Callable[..., HoverResult]] = None,
+        selector_game_id: Optional[str] = None,
     ) -> TargetResolution:
         """
         Locates target element, rejects ambiguity, and verifies features.
@@ -76,12 +81,14 @@ class TargetResolver:
 
         # Resolve selector definition from loaded skill packs if selector_id is provided
         if selector_id and self.skill_packs:
-            for pack in self.skill_packs.values():
+            for game_id, pack in self.skill_packs.items():
+                if selector_game_id is not None and selector_game_id != game_id:
+                    continue
                 selectors_dict = getattr(pack, "selectors", {})
                 if selector_id in selectors_dict:
                     sel = selectors_dict[selector_id]
                     if not icon_name and getattr(sel, "template_file", None):
-                        icon_name = selector_id
+                        icon_name = scoped_template_name(game_id, selector_id) if selector_game_id else selector_id
                     if not text_pattern and getattr(sel, "text_pattern", None):
                         text_pattern = sel.text_pattern
                     if not search_roi and getattr(sel, "search_roi", None):

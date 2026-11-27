@@ -6,7 +6,7 @@ Provides visual diffing, state change verification, and tooltip hover-and-read m
 from __future__ import annotations
 import time
 import logging
-from typing import Optional, List, Tuple, Any
+from typing import Callable, Optional, List, Tuple, Any
 import numpy as np
 import cv2
 
@@ -48,6 +48,7 @@ class ActionVerifier:
         dry_run: Optional[bool] = None,
         *,
         target_window: Optional[WindowInfo] = None,
+        scoped_capture: Optional[Callable[[], np.ndarray]] = None,
     ) -> HoverResult:
         """
         Hovers over target coordinates, detects any newly appeared tooltip window,
@@ -59,6 +60,8 @@ class ActionVerifier:
         win = target_window if target_window is not None else manager.current_window
 
         def capture():
+            if scoped_capture is not None:
+                return scoped_capture()
             if target_window is not None:
                 return self.capture_manager.capture_attached_window(manager, target_window)
             return self.capture_manager.capture(window=win)

@@ -157,3 +157,16 @@ rather than routing from a guess. This preview does not mark P0 or V2.1 complete
 | Adaptive recognition and bounded recovery | Unknown or ambiguous states emit bounded observations only; recovery can use validated routes but never sends blind reset keys. Exercise shifted layout and blocked recovery fixtures. |
 | Exploration budget and cross-game concepts | Budget persists for a bounded exploration session; concept transfer is candidate-only and cannot carry over game IDs, coordinates, or verified status. |
 | Zero-knowledge gate | Fresh test profiles on Windows with no curated Stellaris/Civ VI skills; real games, fixtures and mock results reported separately. |
+
+### Native compound actions
+
+The MCP `navigate_to` and `execute_skill` tools bind one focused native
+client, game ID, attachment revision and capture backend at entry. Steps
+recheck that scope before sending input or using a frame; they never refocus
+a different window. An interruption after dispatch retains the fact that a
+step ran, but does not add a successful transition or credit a skill result.
+Multi-step dry-run may still inspect the real attached client and requires
+the same native scope; use the explicit offline fixture for headless work.
+Fixture behavior and storage remain separate. These checks are cooperative:
+they cannot make desktop input dispatch atomic with OS focus changes or
+replace Windows real-game testing.

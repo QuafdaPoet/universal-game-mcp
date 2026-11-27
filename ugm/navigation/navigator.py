@@ -17,6 +17,7 @@ from .graph import NavigationGraph, PathResult
 from ..skills.contracts import NavigationEdge
 from ..core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
 from ..core.capture import CaptureManager
+from ..core.action_scope import NativeActionScope, ActionScopeInterrupted
 from ..core.input import InputController
 from ..core.target import TargetExecutor, TargetResolver
 from ..core.window import WindowManager
@@ -90,7 +91,8 @@ class UINavigator:
         target_state: str,
         game_id: str = "hoi4",
         max_retries: int = 2,
-        dry_run: bool = False
+        dry_run: bool = False,
+        *, action_scope: Optional[NativeActionScope] = None,
     ) -> NavigationResult:
         """
         Safely navigates from current game UI state to target_state.
@@ -119,12 +121,16 @@ class UINavigator:
 
         # Step 1: Observe current initial state
         win = self.input_controller.window_manager.current_window
-        init_frame = self.capture_manager.capture(window=win)
+        capture = action_scope.capture if action_scope else lambda: self.capture_manager.capture(window=win)
+        init_frame = capture()
         simulation_frames = bool(self.recognizer.storage and self.recognizer.storage.db.simulation)
         curr_det = self.recognizer.recognize_state(
             init_frame, game_id=game_id,
-            simulation=simulation_frames, record_observation=not effective_dry_run or simulation_frames,
+            simulation=simulation_frames,
+            record_observation=action_scope is None and (not effective_dry_run or simulation_frames),
         )
+        if action_scope:
+            action_scope.require_window()
         start_state = curr_det.state_name
         current_state = start_state
 
@@ -204,7 +210,16 @@ class UINavigator:
             if not self.graph.is_edge_eligible(edge):
                 halt_reason = "queued transition is no longer eligible"
                 break
-            exec_ok, exec_err = self._dispatch_navigation_action(edge, dry_run=effective_dry_run)
+            try:
+                exec_ok, exec_err = self._dispatch_navigation_action(
+                    edge, dry_run=effective_dry_run,
+                    **({"action_scope": action_scope} if action_scope else {}),
+                )
+                if not exec_ok and action_scope:
+                    action_scope.require_window()
+            except (ActionScopeInterrupted, EmergencyStopTriggered) as exc:
+                halt_reason = str(exc)
+                break
             if not exec_ok:
                 step_log = NavigationStepLog(
                     step_index=idx + 1,
@@ -247,8 +262,24 @@ class UINavigator:
                 step_verified = False
             else:
                 time.sleep(0.08)
-                post_frame = self.capture_manager.capture(window=win)
-                post_det = self.recognizer.recognize_state(post_frame, game_id=game_id)
+                try:
+                    post_frame = capture()
+                    post_det = self.recognizer.recognize_state(
+                        post_frame, game_id=game_id,
+                        **({"record_observation": False} if action_scope else {}),
+                    )
+                    if action_scope:
+                        action_scope.require_window()
+                except ActionScopeInterrupted as exc:
+                    steps_executed += 1
+                    step_logs.append(NavigationStepLog(
+                        idx + 1, current_state, expected_next, "unknown",
+                        edge.trigger_action, edge.parameters, False,
+                        (time.perf_counter() - step_t0) * 1000.0,
+                        "Step dispatched; outcome could not be observed.",
+                    ))
+                    current_state, halt_reason = "unknown", str(exc)
+                    break
                 observed_state = post_det.state_name
                 observation_status = post_det.status
                 step_verified = observation_status == "known" and observed_state == expected_next
@@ -352,16 +383,18 @@ class UINavigator:
     def _dispatch_navigation_action(
         self,
         edge: NavigationEdge,
-        dry_run: bool = False
+        dry_run: bool = False,
+        *, action_scope: Optional[NativeActionScope] = None,
     ) -> Tuple[bool, Optional[str]]:
         """Executes a single navigation action primitive safely."""
         action = edge.trigger_action
         params = edge.parameters
+        bound = action_scope.input_kwargs() if action_scope else {}
 
         if action == "press_keys":
             keys = params.get("keys", [])
             dur = params.get("duration_ms", 100)
-            res = self.input_controller.press_keys(keys=keys, duration_ms=dur, dry_run=dry_run)
+            res = self.input_controller.press_keys(keys=keys, duration_ms=dur, dry_run=dry_run, **bound)
             return res.success, res.message if not res.success else None
 
         elif action in ("click_selector", "locate_and_click"):
@@ -378,10 +411,12 @@ class UINavigator:
             return ok, None if ok else res.reason
 
         elif action == "click_target":
+            if action_scope and ("x" not in params or "y" not in params):
+                return False, "Live route coordinates must be explicit."
             nx = params.get("x", 0.5)
             ny = params.get("y", 0.5)
             btn = params.get("button", "left")
-            res = self.input_controller.click(norm_x=nx, norm_y=ny, button=btn, dry_run=dry_run)
+            res = self.input_controller.click(norm_x=nx, norm_y=ny, button=btn, dry_run=dry_run, **bound)
             ok = res.executed or (res.dry_run and res.status == "success")
             return ok, None if ok else res.reason
 
