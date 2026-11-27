@@ -44,6 +44,7 @@ from .core.icon import IconDetector
 from .core.input import InputController
 from .core.verifier import ActionVerifier
 from .core.dataset import DatasetCollector
+from .core.semantic_discovery import validate_goal, grounded_matches, MAX_RESULTS
 from .core.target import TargetResolver, TargetExecutor
 from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
@@ -106,6 +107,7 @@ class ObservationScope:
     simulation: bool
     fixture: bool
     backend_revision: int
+    native_game_id: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -483,14 +485,26 @@ class UGMContext:
             self.simulation_session,
             self._offline_fixture_configured,
             self.capture_manager.backend_revision,
+            game_id_for_window(window) if window is not None and not self._offline_fixture_configured else None,
         )
 
+    def require_observation_scope(self, scope: ObservationScope) -> Optional[WindowInfo]:
+        current = self.window_manager.current_window
+        window = replace(current) if current is not None else None
+        if scope != self._observation_scope(window):
+            raise SafetyViolationError("Observation target or backend changed; retry the observation.")
+        if not scope.fixture:
+            self.capture_manager.require_attached_window(self.window_manager, window)
+        return window
+
     def capture_verification_frame(
-        self, baseline: Optional[VerificationBaseline] = None,
+        self, baseline: Optional[VerificationBaseline] = None, *, game_id: Optional[str] = None,
     ) -> tuple[np.ndarray, ObservationScope]:
         current = self.window_manager.current_window
         window = replace(current) if current is not None else None
         scope = self._observation_scope(window)
+        if not scope.fixture and window is not None and game_id is not None and game_id != scope.native_game_id:
+            raise SafetyViolationError("Requested game_id does not match the attached game.")
         if baseline is not None and (baseline.scope != scope or not baseline.is_fresh()):
             raise InvalidVerificationBaseline()
         frame = self._capture_observation_for_window(window)
@@ -605,8 +619,16 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Detects ambiguity and generates external Vision Agent escalation payload when uncertain.
         """
         t0 = time.perf_counter()
-        norm_roi = NormalizedRect(roi[0], roi[1], roi[2], roi[3]) if roi and len(roi) == 4 else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+        norm_roi = _parse_observation_roi(roi, "Target")
+        frame, scope = ctx.capture_verification_frame()
+
+        def read_bound_tooltip(**kwargs):
+            window = ctx.require_observation_scope(scope)
+            result = ctx.verifier.hover_and_read_tooltip(
+                **kwargs, target_window=None if scope.fixture else window,
+            )
+            ctx.require_observation_scope(scope)
+            return result
 
         custom_img = None
         if template_base64:
@@ -646,9 +668,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             score_tolerance=score_tolerance,
             hover_verification=resolved_hover,
             expected_tooltip=resolved_tooltip,
-            selector_id=selector_id
+            selector_id=selector_id,
+            hover_reader=read_bound_tooltip,
         )
 
+        ctx.require_observation_scope(scope)
         res_dict = resolution.to_dict()
         res_dict["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         res_dict["threshold"] = resolved_threshold
@@ -986,18 +1010,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Native frames require a focused attachment; an explicit game ID must match the attached game.
         Returns confidence, supporting observable evidence, perceptual hash, and whether state is known/ambiguous/unknown.
         """
-        if ctx._offline_fixture_configured:
-            target_game_id = game_id or ctx.active_game_id or "hoi4"
-            frame = ctx.capture_observation()
-        else:
-            attached_window = ctx.window_manager.current_window
-            if attached_window is None:
-                raise SafetyViolationError("No target game window attached. Attach a game before classifying its UI.")
-            window = replace(attached_window)
-            target_game_id = game_id_for_window(window)
-            if game_id is not None and game_id != target_game_id:
-                raise SafetyViolationError("Requested game_id does not match the attached game.")
-            frame = ctx.capture_manager.capture_attached_window(ctx.window_manager, window)
+        frame, scope = ctx.capture_verification_frame(game_id=game_id)
+        target_game_id = scope.native_game_id or game_id or ctx.active_game_id or "hoi4"
         det = ctx.state_recognizer.recognize_state(
             frame, game_id=target_game_id, hint_state=hint_state,
             simulation=ctx.simulation_session,
@@ -1052,11 +1066,18 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         """
         target_game_id = game_id or ctx.active_game_id or "hoi4"
         if not start_state:
-            frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+            frame, scope = ctx.capture_verification_frame(game_id=game_id)
+            target_game_id = scope.native_game_id or target_game_id
             det = ctx.state_recognizer.recognize_state(
-                frame, game_id=target_game_id, simulation=ctx.simulation_session,
-                record_observation=not ctx.input_controller.is_dry_run_active() or ctx.simulation_session,
+                frame, game_id=target_game_id, simulation=scope.simulation, record_observation=False,
             )
+            ctx.require_observation_scope(scope)
+            if det.status != "known" or det.state_name == "unknown":
+                return {
+                    "found": False, "start_state": "unknown", "target_state": target_state,
+                    "total_cost": None, "steps_count": 0, "nodes_path": [], "steps": [],
+                    "message": "The starting UI state is unknown or ambiguous; observe again before planning.",
+                }
             start_state = det.state_name
 
         graph = ctx.get_navigation_graph(target_game_id)
@@ -1246,17 +1267,40 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
     @server.tool()
     def explore_interactive_elements(
         roi: Optional[List[float]] = None,
-        scan_mode: str = "all"
+        scan_mode: str = "all",
+        goal: Optional[str] = None,
+        max_results: Annotated[int, Field(ge=1, le=MAX_RESULTS)] = 6,
     ) -> Dict[str, Any]:
         """
-        Scans current game screen (or ROI) for candidate interactive UI affordances:
-        buttons, text anchors, tabs, and layout regions.
+        Scans a scoped game client or fixture for UI candidates.
+        With goal, return bounded OCR label matches for an external agent to interpret.
+        Goal mode is read-only, never dispatches input, and does not establish
+        whether a label is interactive. Use text labels, not a long instruction.
         """
-        if roi is not None and len(roi) != 4:
-            raise ValueError("Exploration ROI must contain [x, y, width, height].")
-        norm_roi = NormalizedRect(*roi) if roi is not None else None
-        frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
-        candidates = ctx.explorer.discover_interactive_elements(frame, roi=norm_roi, scan_mode=scan_mode)
+        norm_roi = _parse_observation_roi(roi, "Exploration")
+        if scan_mode not in {"all", "text", "shapes", "buttons"}:
+            raise ValueError("Exploration scan_mode must be all, text, shapes, or buttons.")
+        terms = validate_goal(goal) if goal is not None else None
+        if terms is not None and scan_mode == "shapes":
+            raise ValueError("Exploration goal mode needs text; shapes-only mode is unsupported.")
+        frame, scope = ctx.capture_verification_frame()
+        candidates = ctx.explorer.discover_interactive_elements(
+            frame, roi=norm_roi, scan_mode="text" if terms is not None else scan_mode,
+        )
+        ctx.require_observation_scope(scope)
+        if terms is not None:
+            if scope.fixture:
+                source = "offline_fixture"
+            elif scope.simulation:
+                source = "dry_run_observation"
+            else:
+                source = "live_observation"
+            total, matches = grounded_matches(candidates, terms, max_results, source)
+            return {
+                "count": len(matches), "candidates": matches, "scan_mode": "text",
+                "goal": goal, "total_matches": total, "truncated": total > max_results,
+                "observation_source": source,
+            }
         return {
             "count": len(candidates),
             "candidates": [c.to_dict() for c in candidates],

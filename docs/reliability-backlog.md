@@ -130,3 +130,30 @@ by the end of OCR was 461 MB full versus 471 MB cropped (decimal, medians).
 The crop was faster on this fixture but did not lower peak memory. Use bounded
 reads for known regions without assuming they meet the 250 MB budget or replace
 full-frame discovery. These measurements cover a simulator image, not a game.
+
+## V2.1 preview: goal-grounded UI observations
+
+`explore_interactive_elements({"goal":"production queue","max_results":6})`
+returns a short list of visible OCR labels that share words with an objective
+provided by the external agent. It does not infer synonyms, gameplay meaning,
+actions, or success. Use separate calls for alternative labels. The result has
+no click suggestion; an observation ID is local to the result, not a saved
+selector. Matches use word count, then raw OCR confidence, with a stable
+geometry tie-break. The default limit is 6 (maximum 12); one scan runs, with
+no hardware input or knowledge writes. This limits returned context size,
+not OCR inference memory or the total number of calls. No matching label
+yields an empty list. Legacy calls without a goal keep their candidate shape.
+
+The source distinguishes explicit fixture, native observation in dry-run, and
+ordinary live observation. Locator and exploration frames are scoped to the
+attached game; an attachment or backend change invalidates the result.
+Automatic route discovery declines an unknown or ambiguous initial state
+rather than routing from a guess. This preview does not mark P0 or V2.1 complete.
+
+| Remaining V2.1 dependency | Acceptance evidence |
+| --- | --- |
+| Close native input/capture P0 gates | Hardware sequence serialization with independent stop, bound target and postconditions; Windows real-client observation before safe disposable-action trials. |
+| Evidence-backed persistence and selectors | Re-observe a recipe under matched game and state, require independent valid receipts before promotion, separate simulations, retain contradictory evidence, and decline ambiguous or stale selectors. |
+| Adaptive recognition and bounded recovery | Unknown or ambiguous states emit bounded observations only; recovery can use validated routes but never sends blind reset keys. Exercise shifted layout and blocked recovery fixtures. |
+| Exploration budget and cross-game concepts | Budget persists for a bounded exploration session; concept transfer is candidate-only and cannot carry over game IDs, coordinates, or verified status. |
+| Zero-knowledge gate | Fresh test profiles on Windows with no curated Stellaris/Civ VI skills; real games, fixtures and mock results reported separately. |

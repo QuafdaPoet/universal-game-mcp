@@ -15,7 +15,8 @@ from .types import (
     BoundingBox,
     HoverResult,
     VerificationResult,
-    OCRResult
+    OCRResult,
+    WindowInfo,
 )
 from .capture import CaptureManager
 from .ocr import BaseOCREngine
@@ -44,7 +45,9 @@ class ActionVerifier:
         norm_x: float,
         norm_y: float,
         duration_ms: int = 500,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        *,
+        target_window: Optional[WindowInfo] = None,
     ) -> HoverResult:
         """
         Hovers over target coordinates, detects any newly appeared tooltip window,
@@ -52,9 +55,15 @@ class ActionVerifier:
         """
         t0 = time.perf_counter()
 
-        win = self.input_controller.window_manager.current_window
-        # Capture pre-hover baseline
-        pre_frame = self.capture_manager.capture(window=win)
+        manager = self.input_controller.window_manager
+        win = target_window if target_window is not None else manager.current_window
+
+        def capture():
+            if target_window is not None:
+                return self.capture_manager.capture_attached_window(manager, target_window)
+            return self.capture_manager.capture(window=win)
+
+        pre_frame = capture()
         h, w = pre_frame.shape[:2]
 
         # Execute hover
@@ -62,11 +71,12 @@ class ActionVerifier:
             norm_x=norm_x,
             norm_y=norm_y,
             duration_ms=duration_ms,
-            dry_run=dry_run
+            dry_run=dry_run,
+            **({"target_window": target_window} if target_window is not None else {}),
         )
 
         # Capture post-hover frame
-        post_frame = self.capture_manager.capture(window=win)
+        post_frame = capture()
 
         # Find visual difference to isolate tooltip
         diff = cv2.absdiff(pre_frame, post_frame)
@@ -100,7 +110,7 @@ class ActionVerifier:
                 tooltip_text = ocr_res.full_text if ocr_res.items else None
 
         # Fallback if no clean diff detected (e.g. static mock or dry run): check neighborhood around target
-        if not tooltip_detected:
+        if not tooltip_detected and target_window is None:
             # Check a 20% x 10% box around target
             box_w = 0.25
             box_h = 0.12
