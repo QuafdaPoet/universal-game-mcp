@@ -869,6 +869,10 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 deleted_counts["states"] = conn.execute(q, (game_id,) if game_id else ()).rowcount
                 q2 = "DELETE FROM selectors_memory" + (" WHERE game_id = ?" if game_id else "")
                 deleted_counts["selectors"] = conn.execute(q2, (game_id,) if game_id else ()).rowcount
+                q3 = "DELETE FROM semantic_selector_recipes" + (" WHERE game_id = ?" if game_id else "")
+                deleted = conn.execute(q3, (game_id,) if game_id else ()).rowcount
+                if deleted:
+                    deleted_counts["semantic_selector_recipes"] = deleted
 
         return {"deleted": deleted_counts, "game_id": game_id, "scope": scope}
 
@@ -979,6 +983,9 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                     logger.warning("Checkpoint %d for game '%s' not found.", checkpoint_id, game_id)
                     return False
                 restore_snapshot(conn, game_id, row["snapshot_data"], simulation=self.db.simulation)
+                # These observations are not part of the legacy snapshot.
+                # Force re-observation rather than trust potentially stale evidence.
+                conn.execute("DELETE FROM semantic_selector_recipes WHERE game_id = ?", (game_id,))
                 # Observation history for a not-yet-active candidate cannot
                 # survive a rollback of the environment it was built against.
                 # Keep already-promoted archives for audit.

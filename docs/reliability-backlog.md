@@ -184,3 +184,24 @@ at most eight session records and accepts at most 16 scans each. Sessions
 do not survive a process restart and never write gameplay evidence.
 This is a cooperative budget for clients using that ID, not a global limit
 on legacy calls or starting new sessions, nor a hard OCR wall-clock timeout.
+
+### Preview: evidence ledger for OCR labels
+
+Schema v6 adds an isolated ledger for (game, known state, selector ID).
+Legacy selector rows are not upgraded to evidence. A recipe is an exact
+normalized text label, not saved coordinates or a claim that the label is
+interactive. Matching declines missing, competing or unreadable labels.
+Three distinct clean frame digests from at least two attachment tokens
+are required for `repeat_observed`; an informative absent or ambiguous
+sample resets that run, and old evidence expires after 30 days. The ledger
+retains contradictions and duplicate identities until the game/state
+memory is cleared. At 128 receipts, it enters `needs_review` and requires
+recipe review or versioning. Rolling back a legacy checkpoint clears this
+ledger for the selected game rather than reviving unprovable evidence.
+
+This draft includes the matcher, storage, and migration, **not** a native
+receipt producer or MCP persistence feature. Tests inject typed receipts
+with fake data; they are not recordings of a real game. The next gate is
+a server-issued receipt from a fresh scoped capture of a known screen,
+with fixture/dry-run/default-off isolation. A repeated OCR observation
+does not grant input authority, even after that gate.

@@ -19,7 +19,7 @@ from .transition_quarantine import quarantine_transition, transition_identity
 
 logger = logging.getLogger("ugm.memory.database")
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 _SIMULATION_APPLICATION_ID = 0x55474D53  # 'UGMS'
 SIMULATION_DB_SUFFIX = ".simulation"
 
@@ -441,5 +441,36 @@ class DatabaseManager:
                 CREATE INDEX idx_skill_optimization_captures_trial ON skill_optimization_capture_ids (trial_id);
             """)
             conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (5, ?)", (time.time(),))
+
+        if from_ver < 6 <= to_ver:
+            self._execute_migration_script(conn, """
+                CREATE TABLE semantic_selector_recipes (
+                    game_id TEXT NOT NULL,
+                    state_name TEXT NOT NULL,
+                    selector_id TEXT NOT NULL,
+                    normalized_label TEXT NOT NULL,
+                    PRIMARY KEY (game_id, state_name, selector_id)
+                ) WITHOUT ROWID;
+
+                CREATE TABLE semantic_selector_receipts (
+                    sequence_id INTEGER PRIMARY KEY,
+                    game_id TEXT NOT NULL,
+                    state_name TEXT NOT NULL,
+                    selector_id TEXT NOT NULL,
+                    receipt_id TEXT NOT NULL,
+                    capture_sha256 TEXT NOT NULL,
+                    attachment_token TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source = 'live_observation'),
+                    outcome TEXT NOT NULL CHECK (outcome IN ('found', 'not_found', 'ambiguous')),
+                    observed_at REAL NOT NULL,
+                    FOREIGN KEY (game_id, state_name, selector_id)
+                        REFERENCES semantic_selector_recipes (game_id, state_name, selector_id) ON DELETE CASCADE,
+                    UNIQUE (game_id, state_name, selector_id, receipt_id),
+                    UNIQUE (game_id, state_name, selector_id, capture_sha256)
+                );
+                CREATE INDEX idx_semantic_selector_receipts_lookup
+                ON semantic_selector_receipts (game_id, state_name, selector_id, sequence_id);
+            """)
+            conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (6, ?)", (time.time(),))
 
         logger.info("Database schema migration to v%d complete.", to_ver)
