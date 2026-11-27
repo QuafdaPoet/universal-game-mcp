@@ -18,6 +18,7 @@ from .loader import GameSkillPack
 from ..core.types import NormalizedRect, TargetStatus, ClickResult
 from ..core.safety import safety_manager, EmergencyStopTriggered, SafetyViolationError
 from ..core.capture import CaptureManager
+from ..core.action_scope import NativeActionScope, ActionScopeInterrupted
 from ..core.ocr import BaseOCREngine
 from ..core.input import InputController
 from ..core.verifier import ActionVerifier
@@ -71,7 +72,12 @@ class SkillExecutionResult:
     evidence: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result["evidence_level"] = (
+            "simulated" if self.dry_run else
+            "verified" if self.post_verification_passed else "observed"
+        )
+        return result
 
 
 class SkillExecutionEngine:
@@ -125,8 +131,8 @@ class SkillExecutionEngine:
 
         # 2. Learned persistent skills
         if self.storage:
-            learned = self.storage.get_learned_skill(skill_id)
-            if learned and (not game_id or learned.game_id == game_id):
+            learned = self.storage.get_learned_skill(skill_id, game_id=game_id)
+            if learned:
                 return {
                     "skill_id": learned.skill_id,
                     "game_id": learned.game_id,
@@ -149,7 +155,8 @@ class SkillExecutionEngine:
         skill_id: str,
         game_id: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        *, action_scope: Optional[NativeActionScope] = None,
     ) -> SkillExecutionResult:
         """
         Executes a registered skill end-to-end with validation and verification.
@@ -198,6 +205,8 @@ class SkillExecutionEngine:
             )
 
         resolved_game_id = skill_data["game_id"]
+        if action_scope and resolved_game_id != game_id:
+            raise SafetyViolationError("Resolved skill belongs to another game.")
         steps = skill_data.get("steps", [])
         preconditions = skill_data.get("preconditions", {})
         post_verification = skill_data.get("post_verification", {})
@@ -267,67 +276,104 @@ class SkillExecutionEngine:
                     evidence={"preconditions": preconditions}
                 )
 
+        capture = action_scope.capture if action_scope else lambda: self.capture_manager.capture(window=win)
+
+        def interrupted(exc: Exception) -> SkillExecutionResult:
+            return SkillExecutionResult(
+                skill_id=skill_id, game_id=resolved_game_id, success=False,
+                status="blocked", preconditions_met=True,
+                steps_executed=0 if effective_dry_run else sum(log.executed for log in step_logs),
+                steps_total=len(steps), post_verification_passed=False, dry_run=effective_dry_run,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                message=f"Skill interrupted; no more steps dispatched and outcome not verified: {exc}",
+                step_logs=[{**asdict(log), "executed": log.executed and not effective_dry_run} for log in step_logs],
+                evidence={"verification_interrupted": True},
+            )
+
         # Step 4: Baseline capture before executing steps
-        pre_action_frame = self.capture_manager.capture(window=win)
+        try:
+            pre_action_frame = None if effective_dry_run else capture()
+        except ActionScopeInterrupted as exc:
+            return interrupted(exc)
 
         # Step 5: Execute Sequential Steps
         bound_params = params or {}
         for idx, step in enumerate(steps):
-            safety_manager.check_safety()
-            step_t0 = time.perf_counter()
-
-            step_res = self._execute_step(
-                step=step,
-                step_index=idx + 1,
-                bound_params=bound_params,
-                dry_run=effective_dry_run,
-                game_id=resolved_game_id
-            )
-            step_logs.append(step_res)
+            try:
+                safety_manager.check_safety()
+                step_res = self._execute_step(
+                    step=step, step_index=idx + 1, bound_params=bound_params,
+                    dry_run=effective_dry_run, game_id=resolved_game_id,
+                    action_scope=action_scope,
+                )
+                step_logs.append(step_res)
+                if action_scope:
+                    action_scope.require_window()
+                    if (step_res.evidence or {}).get("verification_interrupted"):
+                        raise ActionScopeInterrupted(step_res.message)
+            except (ActionScopeInterrupted, EmergencyStopTriggered) as exc:
+                return interrupted(exc)
 
             if not step_res.success:
                 latency = (time.perf_counter() - t0) * 1000.0
-                self._record_execution_history(resolved_game_id, skill_id, success=False, reason=step_res.message, duration_ms=latency, source="live" if not effective_dry_run else "synthetic_fixture")
-                if self.storage and not skill_data.get("is_curated"):
-                    self.storage.update_skill_stats(skill_id, success=False, is_execution_error=True, reason=step_res.message)
+                if not effective_dry_run:
+                    self._record_execution_history(
+                        resolved_game_id, skill_id, success=False,
+                        reason=step_res.message, duration_ms=latency,
+                    )
+                if self.storage and not effective_dry_run and not skill_data.get("is_curated"):
+                    self.storage.update_skill_stats(
+                        skill_id, success=False, is_execution_error=True, reason=step_res.message,
+                        game_id=resolved_game_id, expected_version=skill_data.get("version"),
+                    )
                 return SkillExecutionResult(
                     skill_id=skill_id,
                     game_id=resolved_game_id,
                     success=False,
                     status="failed",
                     preconditions_met=True,
-                    steps_executed=idx,
+                    steps_executed=0 if effective_dry_run else idx,
                     steps_total=len(steps),
                     post_verification_passed=False,
                     dry_run=effective_dry_run,
                     latency_ms=latency,
                     message=f"Step {idx + 1} ({step.get('action')}) failed: {step_res.message}",
-                    step_logs=[asdict(s) for s in step_logs],
+                    step_logs=[{**asdict(s), "executed": s.executed and not effective_dry_run} for s in step_logs],
                     evidence={"failed_step": idx + 1, "details": step_res.evidence}
                 )
 
         # Step 6: Postcondition Verification
-        time.sleep(0.08)
-        post_action_frame = self.capture_manager.capture(window=win)
-
-        post_ver_ok, post_ver_msg, ver_details = self._verify_postconditions(
-            post_verification=post_verification,
-            pre_frame=pre_action_frame,
-            post_frame=post_action_frame,
-            dry_run=effective_dry_run
-        )
+        try:
+            post_action_frame = None
+            if not effective_dry_run:
+                time.sleep(0.08)
+                post_action_frame = capture()
+            post_ver_ok, post_ver_msg, ver_details = self._verify_postconditions(
+                post_verification=post_verification,
+                pre_frame=pre_action_frame, post_frame=post_action_frame,
+                dry_run=effective_dry_run,
+            )
+            if action_scope:
+                action_scope.require_window()
+        except ActionScopeInterrupted as exc:
+            return interrupted(exc)
 
         latency = (time.perf_counter() - t0) * 1000.0
         final_success = post_ver_ok
 
-        self._record_execution_history(
-            resolved_game_id, skill_id, success=final_success, reason=post_ver_msg,
-            duration_ms=latency, source="live" if not effective_dry_run else "synthetic_fixture"
-        )
+        if not effective_dry_run:
+            self._record_execution_history(
+                resolved_game_id, skill_id, success=final_success,
+                reason=post_ver_msg, duration_ms=latency,
+            )
 
-        # Update stats if this is a learned skill
-        if self.storage and not skill_data.get("is_curated"):
-            self.storage.update_skill_stats(skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg)
+        # Only an actual postcondition check can validate or invalidate a
+        # learned gameplay rule. Mere successful dispatch is not evidence.
+        if self.storage and not effective_dry_run and post_verification and not skill_data.get("is_curated"):
+            self.storage.update_skill_stats(
+                skill_id, success=final_success, is_execution_error=False, reason=post_ver_msg,
+                game_id=resolved_game_id, expected_version=skill_data.get("version"),
+            )
 
         return SkillExecutionResult(
             skill_id=skill_id,
@@ -335,13 +381,13 @@ class SkillExecutionEngine:
             success=final_success,
             status="success" if final_success else "failed",
             preconditions_met=True,
-            steps_executed=len(steps),
+            steps_executed=0 if effective_dry_run else len(steps),
             steps_total=len(steps),
-            post_verification_passed=post_ver_ok,
+            post_verification_passed=post_ver_ok and not effective_dry_run and bool(post_verification),
             dry_run=effective_dry_run,
             latency_ms=latency,
             message=f"Skill '{skill_id}' execution {'PASSED' if final_success else 'FAILED'}: {post_ver_msg}",
-            step_logs=[asdict(s) for s in step_logs],
+            step_logs=[{**asdict(s), "executed": s.executed and not effective_dry_run} for s in step_logs],
             evidence=ver_details
         )
 
@@ -351,7 +397,8 @@ class SkillExecutionEngine:
         step_index: int,
         bound_params: Dict[str, Any],
         dry_run: bool,
-        game_id: str
+        game_id: str,
+        action_scope: Optional[NativeActionScope] = None,
     ) -> StepExecutionLog:
         """Dispatches an individual allowlisted action primitive."""
         action = step.get("action")
@@ -361,10 +408,11 @@ class SkillExecutionEngine:
         t0 = time.perf_counter()
 
         try:
+            bound = action_scope.input_kwargs() if action_scope else {}
             if action in ("press_keys", "press_key"):
                 keys = merged_params.get("keys") or ([merged_params["key"]] if "key" in merged_params else [])
                 duration = merged_params.get("duration_ms", 50)
-                res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run)
+                res = self.input_controller.press_keys(keys=keys, duration_ms=duration, dry_run=dry_run, **bound)
                 succ = res.success if hasattr(res, "success") else (res.get("success", res.get("executed", True)) if isinstance(res, dict) else True)
                 msg = res.message if hasattr(res, "message") else (res.get("message", "Executed") if isinstance(res, dict) else "")
                 return StepExecutionLog(
@@ -384,15 +432,22 @@ class SkillExecutionEngine:
                 clicks = step.get("clicks", 1)
 
                 win = self.input_controller.window_manager.current_window
-                frame = self.capture_manager.capture(window=win)
+                frame = action_scope.capture() if action_scope else self.capture_manager.capture(window=win)
+
+                def read_bound_tooltip(**kwargs):
+                    return self.verifier.hover_and_read_tooltip(
+                        **kwargs, target_window=action_scope.require_window(),
+                        scoped_capture=action_scope.capture,
+                    )
 
                 target_res = self.target_resolver.resolve_target(
                     frame=frame,
                     selector_id=sel_id,
-                    dry_run=dry_run
+                    dry_run=dry_run,
+                    **({"selector_game_id": game_id, "hover_reader": read_bound_tooltip} if action_scope else {}),
                 )
 
-                if target_res.status in (TargetStatus.NOT_FOUND.value, TargetStatus.AMBIGUOUS.value):
+                if target_res.status not in ("found", TargetStatus.SUCCESS.value):
                     return StepExecutionLog(
                         step_index=step_index,
                         action=action,
@@ -408,59 +463,65 @@ class SkillExecutionEngine:
                     target_resolution=target_res,
                     button=btn,
                     clicks=clicks,
-                    dry_run=dry_run
+                    dry_run=dry_run,
+                    **({**action_scope.input_kwargs(), "scoped_capture": action_scope.capture} if action_scope else {}),
                 )
-                succ = click_res.status == TargetStatus.SUCCESS.value or dry_run
+                succ = click_res.status == TargetStatus.SUCCESS.value
                 return StepExecutionLog(
                     step_index=step_index,
                     action=action,
                     params={"selector": sel_id, "button": btn},
                     success=succ,
-                    executed=click_res.executed or dry_run,
+                    executed=click_res.executed,
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
                     message=click_res.reason,
                     evidence=click_res.evidence
                 )
 
             elif action in ("click_target", "click"):
+                if action_scope and ("x" not in merged_params or "y" not in merged_params):
+                    raise SafetyViolationError("Live skill coordinates must be explicit.")
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 btn = merged_params.get("button", "left")
                 clicks = int(merged_params.get("clicks", 1))
 
                 click_res = self.input_controller.click(
-                    norm_x=nx, norm_y=ny, button=btn, clicks=clicks, dry_run=dry_run
+                    norm_x=nx, norm_y=ny, button=btn, clicks=clicks, dry_run=dry_run, **bound
                 )
                 return StepExecutionLog(
                     step_index=step_index,
                     action=action,
                     params=merged_params,
-                    success=click_res.executed or dry_run,
-                    executed=click_res.executed or dry_run,
+                    success=click_res.executed or (dry_run and click_res.status == TargetStatus.SUCCESS.value),
+                    executed=click_res.executed,
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
                     message=click_res.reason,
                     evidence={"coords": (nx, ny)}
                 )
 
             elif action in ("hover", "hover_target"):
+                if action_scope and ("x" not in merged_params or "y" not in merged_params):
+                    raise SafetyViolationError("Live skill coordinates must be explicit.")
                 nx = float(merged_params.get("x", 0.5))
                 ny = float(merged_params.get("y", 0.5))
                 dur = int(merged_params.get("duration_ms", 250))
-                _, _, ok = self.input_controller.hover(norm_x=nx, norm_y=ny, duration_ms=dur, dry_run=dry_run)
+                _, _, ok = self.input_controller.hover(norm_x=nx, norm_y=ny, duration_ms=dur, dry_run=dry_run, **bound)
                 return StepExecutionLog(
                     step_index=step_index,
                     action=action,
                     params=merged_params,
-                    success=True,
-                    executed=ok or dry_run,
+                    success=ok or dry_run,
+                    executed=ok and not dry_run,
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
-                    message="Hover completed successfully."
+                    message="Hover accepted." if ok or dry_run else "Hover was not dispatched."
                 )
 
             elif action == "wait":
                 dur = int(merged_params.get("duration_ms", 200))
                 safety_manager.check_safety()
-                time.sleep(dur / 1000.0)
+                if not dry_run:
+                    time.sleep(dur / 1000.0)
                 return StepExecutionLog(
                     step_index=step_index,
                     action=action,
@@ -468,7 +529,7 @@ class SkillExecutionEngine:
                     success=True,
                     executed=True,
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
-                    message=f"Waited {dur}ms"
+                    message=f"Would wait {dur}ms." if dry_run else f"Waited {dur}ms"
                 )
 
             else:
@@ -482,6 +543,8 @@ class SkillExecutionEngine:
                     message=f"Unsupported action: {action}"
                 )
 
+        except (ActionScopeInterrupted, EmergencyStopTriggered):
+            raise
         except Exception as e:
             logger.error("Error executing skill step %d (%s): %s", step_index, action, e)
             return StepExecutionLog(
@@ -497,18 +560,21 @@ class SkillExecutionEngine:
     def _verify_postconditions(
         self,
         post_verification: Dict[str, Any],
-        pre_frame: np.ndarray,
-        post_frame: np.ndarray,
+        pre_frame: Optional[np.ndarray],
+        post_frame: Optional[np.ndarray],
         dry_run: bool
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates post-action visual state change or OCR expectations.
         """
+        if dry_run:
+            return True, "[DRY-RUN] Steps accepted; no postcondition verified.", {"dry_run": True}
+
         if not post_verification:
             return True, "No postcondition specified.", {}
 
-        if dry_run:
-            return True, "[DRY-RUN] Verification simulated successfully.", {"dry_run": True}
+        if pre_frame is None or post_frame is None:
+            return False, "Could not capture live evidence.", {}
 
         ver_type = post_verification.get("type", "visual_diff")
         roi_data = post_verification.get("roi")
@@ -568,7 +634,7 @@ class SkillExecutionEngine:
         success: bool,
         reason: str,
         duration_ms: float,
-        source: str
+        source: str = "live"
     ) -> None:
         if self.storage:
             try:
