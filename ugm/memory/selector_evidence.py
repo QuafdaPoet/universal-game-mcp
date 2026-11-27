@@ -45,7 +45,7 @@ def digest_bgr(frame: np.ndarray) -> str:
     return digest.hexdigest()
 
 
-def _normalize_label(label: str) -> str:
+def normalize_label(label: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", label).casefold().split())
 
 
@@ -64,7 +64,7 @@ class LabelMatch:
 
 def locate_exact_label(label: str, items: Iterable[OCRItem]) -> LabelMatch:
     """Resolve only a unique exact label, using current OCR and not past geometry."""
-    target = _normalize_label(label)
+    target = normalize_label(label)
     if not target:
         raise ValueError("A selector label cannot be empty.")
     match: OCRItem | None = None
@@ -72,7 +72,7 @@ def locate_exact_label(label: str, items: Iterable[OCRItem]) -> LabelMatch:
     for item in items:
         if not math.isfinite(item.confidence) or not 0 <= item.confidence <= 1 or not _valid_box(item.bbox_normalized):
             continue
-        text = _normalize_label(item.text)
+        text = normalize_label(item.text)
         readable = readable or (item.confidence >= MIN_CONFIDENCE and bool(text))
         if text == target:
             if match is not None:
@@ -98,7 +98,7 @@ class SelectorRecipe:
             raise ValueError("Invalid game, state or selector ID.")
         if self.state_name.strip().casefold() in {"unknown", "ambiguous"}:
             raise ValueError("Selector recipes require a known state.")
-        label = _normalize_label(self.label)
+        label = normalize_label(self.label)
         if not label or len(self.label) > 160 or len(label) > 160:
             raise ValueError("Invalid selector label.")
         return key, label

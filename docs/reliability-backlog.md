@@ -237,3 +237,16 @@ observations, not instructions. Even a stable result keeps state
 selector is created. An attachment/backend change fails the call. The
 normal navigation gate remains in force. This is bounded guidance, not
 automatic recovery or proof of generalization to a real game.
+
+### Candidate-only transfer between games
+
+`propose_concept_transfer` checks a repeated source selector receipt for a
+reviewed English concept such as pause, cancel, or game speed. It then
+looks for a unique exact cue in one fresh capture of a **different** attached
+native game. Source receipts must be current and uncontested. Unfamiliar,
+weak, or competing responses do not create a candidate. The result is an
+OCR cue, never proof that either game's control behaves the same. No keys,
+coordinates, input, route parameters, legacy concept descriptions, or
+verified state are transferred. The legacy concept query remains unchanged
+for compatibility. No game-specific skill pack or new persistent record
+is required for this candidate check.

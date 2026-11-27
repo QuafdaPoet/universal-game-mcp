@@ -42,7 +42,7 @@ from .core.window import WindowManager, game_id_for_window, window_binding
 from .core.capture import CaptureManager, FixtureBackend
 from .core.action_scope import NativeActionScope
 from .core.exploration_budget import ExplorationBudget, MAX_SCANS
-from .core import state_triage
+from .core import concept_transfer, state_triage
 from .core.ocr import RapidOCREngine, BaseOCREngine, MockOCREngine, get_ocr_engine
 from .core.icon import IconDetector
 from .core.input import InputController
@@ -1684,6 +1684,51 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             "count": len(concepts),
             "concepts": concepts
         }
+
+    @server.tool()
+    @serial_action
+    def propose_concept_transfer(
+        concept_id: Annotated[str, Field(min_length=1, max_length=64)],
+        source_game_id: Annotated[str, Field(min_length=1, max_length=128)],
+        source_state: Annotated[str, Field(min_length=1, max_length=128)],
+        source_selector_id: Annotated[str, Field(min_length=1, max_length=128)],
+        source_label: Annotated[str, Field(min_length=1, max_length=160)],
+    ) -> Dict[str, Any]:
+        """Check whether a repeated source OCR observation has a visible cue in a different attached game.
+
+        An observation-only candidate; never shares coordinates, controls,
+        saved route parameters, or verified status. Does not modify memory.
+        """
+        def require_native() -> None:
+            if (ctx._offline_fixture_configured or ctx.simulation_session or ctx.storage.db.simulation
+                    or ctx.input_controller.is_dry_run_active()):
+                raise SafetyViolationError("Concept transfer is unavailable in fixture or dry-run mode.")
+            if isinstance(ctx.ocr_engine, MockOCREngine):
+                raise SafetyViolationError("Concept transfer requires real OCR.")
+
+        require_native()
+        labels = concept_transfer.eligible_labels(concept_id, source_label)
+        recipe = SelectorRecipe(source_game_id, source_state, source_selector_id, source_label)
+        recipe.validated()
+        expected = ctx._observation_scope(ctx.window_manager.current_window)
+        ctx.require_observation_scope(expected)
+        target_game_id = expected.native_game_id
+        if target_game_id == source_game_id:
+            raise ValueError("Concept transfer requires a different game.")
+        ledger = SelectorEvidenceStore(ctx.storage.db)
+        base = {"concept_id": concept_id, "target_game_id": target_game_id,
+                "verified": False, "action_suggested": False}
+        if ledger.status(recipe).status != "repeat_observed":
+            return {**base, "status": "source_insufficient", "observed_label": None}
+
+        frame, scope = ctx.capture_verification_frame(expected_scope=expected)
+        ocr = ctx.ocr_engine.read_text(frame, event_tag="concept_transfer")
+        status, observed_label = concept_transfer.target_match(labels, ocr.items)
+        ctx.require_observation_scope(scope)
+        require_native()
+        if ledger.status(recipe).status != "repeat_observed":
+            return {**base, "status": "source_insufficient", "observed_label": None}
+        return {**base, "status": status, "observed_label": observed_label}
 
     # 29b. register_cross_game_concept
     @server.tool()
