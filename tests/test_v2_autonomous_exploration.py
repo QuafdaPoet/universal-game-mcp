@@ -50,12 +50,18 @@ def v2_test_env(tmp_path):
 
     return {
         "ctx": ctx,
+        "fixture_path": fixture_path,
         "server": server,
         "db_file": str(db_file),
         "db_mgr": ctx.storage.db,
         "storage": ctx.storage,
         "explorer": ctx.explorer
     }
+
+
+def configure_fixture_window(env, title, process_name):
+    """Concretely configure the simulated window before discovery."""
+    env["ctx"].setup_offline_fixture(env["fixture_path"], title=title, process_name=process_name)
 
 
 # ============================================================================
@@ -72,7 +78,8 @@ async def test_ac1_unknown_game_discovery_and_empty_bootstrap(v2_test_env):
     server = v2_test_env["server"]
     storage = v2_test_env["storage"]
 
-    # Call discover_and_attach_game with a new game title
+    # Only configured fixture windows are discoverable, even in tests.
+    configure_fixture_window(v2_test_env, "Grand Strategy Nova", "gs_nova.exe")
     res = await server.call_tool("discover_and_attach_game", {
         "window_title": "Grand Strategy Nova",
         "process_name": "gs_nova.exe",
@@ -156,11 +163,12 @@ async def test_ac3_probe_action_observe_act_verify_and_retreat(v2_test_env):
         "revert_on_fail": False
     })
     data = extract_data(probe_res)
-    assert data["executed"] is True
+    assert data["executed"] is False
+    assert data["simulation_accepted"] is True
     assert data["action"] == "click"
     assert "diff_ratio" in data
     assert "empirical_evidence" in data
-    assert data["verification_passed"] is True
+    assert data["verification_passed"] is False
 
     # 2. Key press probe step with revert_on_fail enabled
     key_probe = await server.call_tool("probe_action", {
@@ -170,7 +178,8 @@ async def test_ac3_probe_action_observe_act_verify_and_retreat(v2_test_env):
         "revert_on_fail": True
     })
     key_data = extract_data(key_probe)
-    assert key_data["executed"] is True
+    assert key_data["executed"] is False
+    assert key_data["simulation_accepted"] is True
     assert key_data["action"] == "press_key"
 
 
@@ -188,7 +197,7 @@ async def test_ac4_dynamic_skill_learning_and_cross_session_persistence(v2_test_
     db_file = v2_test_env["db_file"]
     game_id = "civ_space"
 
-    # Register game
+    configure_fixture_window(v2_test_env, "Civilization in Space", "civ_space.exe")
     await server.call_tool("discover_and_attach_game", {
         "window_title": "Civilization in Space",
         "process_name": "civ_space.exe"
@@ -225,7 +234,7 @@ async def test_ac4_dynamic_skill_learning_and_cross_session_persistence(v2_test_
     resumed_skill = found_skills["open_tech_tree"]
     assert resumed_skill["name"] == "Open Technology Tree"
     assert resumed_skill["status"] == "candidate"
-    assert resumed_skill["success_count"] == 1
+    assert resumed_skill["success_count"] == 0
 
 
 # ============================================================================
@@ -260,7 +269,7 @@ def test_ac5_isolated_execution_failure_preserves_verified_status(v2_test_env):
 
     skill_before = storage.get_learned_skills(game_id=game_id)[0]
     assert skill_before["status"] == "verified"
-    assert skill_before["success_count"] == 6
+    assert skill_before["success_count"] == 5
     assert skill_before["consecutive_failures"] == 0
 
     # Simulate TRANSIENT EXECUTION FAILURE (e.g. window minimized / timeout)
@@ -373,7 +382,7 @@ async def test_ac8_gradual_skill_optimization(v2_test_env):
     """
     AC-8: AI optimizes an existing learned GameSkill by refining its step sequence
     (e.g. shortening delays, removing redundant clicks), recording rationale,
-    and bumping its version while preserving historical execution track records.
+    and staging it separately without changing the active skill or lending it prior evidence.
     """
     server = v2_test_env["server"]
     storage = v2_test_env["storage"]
@@ -410,12 +419,18 @@ async def test_ac8_gradual_skill_optimization(v2_test_env):
     opt_data = extract_data(opt_res)
     assert opt_data["success"] is True
 
-    # Verify updated skill in storage
+    # The original version and its track record remain active.
     skill = storage.get_learned_skills(game_id=game_id)[0]
-    assert skill["version"] == "1.1.0", "Optimization must bump minor version"
-    assert len(skill["steps"]) == 2, "Steps must reflect streamlined sequence"
-    assert skill["success_count"] == 4, "Execution track record must be preserved"
-    assert "redundant" in skill["optimization_notes"].lower()
+    assert skill["version"] == "1.0.0"
+    assert len(skill["steps"]) == 3
+    assert skill["success_count"] == 3
+
+    candidate = opt_data["candidate"]
+    assert not opt_data["promoted"]
+    assert candidate["version"] == "1.1.0"
+    assert candidate["steps"] == optimized_steps
+    assert candidate["trial_count"] == 0
+    assert "redundant" in candidate["rationale"].lower()
 
 
 # ============================================================================
@@ -514,6 +529,7 @@ async def test_ac1_window_manager_attachment_and_active_game_id(v2_test_env):
     server = v2_test_env["server"]
     ctx = v2_test_env["ctx"]
 
+    configure_fixture_window(v2_test_env, "Endless Space", "endless_space.exe")
     attach_res = await server.call_tool("discover_and_attach_game", {
         "window_title": "Endless Space",
         "process_name": "endless_space.exe"
@@ -540,16 +556,22 @@ async def test_ac1_window_manager_attachment_and_active_game_id(v2_test_env):
 @pytest.mark.asyncio
 async def test_ac2_contour_and_shape_candidates(v2_test_env):
     """
-    Verifies interactive element discovery with scan_mode='shapes' and fallback anchor.
+    Verifies interactive element discovery using an actual visual contour.
     """
     server = v2_test_env["server"]
+    ctx = v2_test_env["ctx"]
+    frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+    frame[:] = 0
+    frame[50:90, 100:240] = 255
+    ctx.capture_manager.backend.set_frame(frame)
 
     res_shapes = await server.call_tool("explore_interactive_elements", {
         "scan_mode": "shapes"
     })
     data = extract_data(res_shapes)
-    assert data["count"] >= 1
+    assert data["count"] == 1
     assert data["scan_mode"] == "shapes"
+    assert data["candidates"][0]["details"]["source"] == "contour"
 
 
 @pytest.mark.asyncio
@@ -605,7 +627,8 @@ async def test_ac3_probe_action_budget_and_action_history(v2_test_env):
             "dry_run": True
         })
         d = extract_data(res)
-        assert d["executed"] is True
+        assert d["executed"] is False
+        assert d["simulation_accepted"] is True
         assert d["probe_step"] == i + 1
 
     # 4th probe exceeds budget
@@ -624,6 +647,7 @@ async def test_ac3_probe_action_budget_and_action_history(v2_test_env):
     history = storage.get_action_history("hoi4")
     assert len(history) >= 3
     assert any("probe_press_key" in h["action_name"] for h in history)
+    assert all(h["source"] == "synthetic_fixture" and not h["success"] for h in history)
 
 
 def test_ac5_verified_skill_protection_on_candidate_resave(v2_test_env):
@@ -839,11 +863,27 @@ def test_adaptive_ui_anchor_matching(v2_test_env):
         evidence={"prominent_text": ["Treaty", "Munich", "INFANTRY"]}
     )
 
+    from ugm.core.ocr import OCRResult, OCRItem
+    from ugm.core.types import BoundingBox, NormalizedRect
+    dummy_box = BoundingBox(0, 0, 50, 20)
+    dummy_norm = NormalizedRect(0.0, 0.0, 0.05, 0.02)
+    mock_ocr = OCRResult(
+        items=[
+            OCRItem("Treaty", 0.95, dummy_box, dummy_norm),
+            OCRItem("Munich", 0.95, dummy_box, dummy_norm),
+            OCRItem("INFANTRY", 0.95, dummy_box, dummy_norm),
+        ],
+        full_text="Treaty Munich INFANTRY",
+        engine="mock",
+        latency_ms=1.0
+    )
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
-    assert det.state_name == "research_hub"
-    assert det.confidence >= 0.70
-    assert "anchor_match" in det.signals
+    from unittest.mock import patch
+    with patch.object(ctx.ocr_engine, "read_text", return_value=mock_ocr):
+        det = ctx.state_recognizer.recognize_state(frame, game_id=game_id)
+        assert det.state_name == "research_hub"
+        assert det.confidence >= 0.70
+        assert "anchor_match" in det.signals
 
 
 @pytest.mark.asyncio
@@ -1028,7 +1068,7 @@ async def test_mcp_tools_default_to_active_game_id(v2_test_env):
     server = v2_test_env["server"]
     ctx = v2_test_env["ctx"]
 
-    # Attach to stellaris
+    configure_fixture_window(v2_test_env, "Stellaris", "stellaris.exe")
     attach_res = await server.call_tool("discover_and_attach_game", {
         "window_title": "Stellaris",
         "process_name": "stellaris.exe"
