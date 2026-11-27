@@ -55,7 +55,10 @@ from .adapters.hoi4.adapter import HOI4Adapter
 
 # V1.5 Subsystems
 from .memory.provisional_screens import ProvisionalScreenStore, fingerprint
-from .memory.selector_evidence import Receipt, SelectorEvidenceStore, SelectorRecipe, digest_bgr, locate_exact_label
+from .memory.selector_evidence import (
+    PROVISIONAL_ID_PATTERN, PROVISIONAL_PREFIX, Receipt, SelectorEvidenceStore,
+    SelectorRecipe, digest_bgr, locate_exact_label,
+)
 from .memory.database import DatabaseManager, SIMULATION_DB_SUFFIX
 from .memory.storage import PersistentKnowledgeStorage
 from .navigation.recognizer import UIStateRecognizer, UIStateDetection
@@ -1162,6 +1165,33 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                          "Wait for the display to settle before observing again.",
         }
 
+    def require_provisional_native(*, learn_screen: bool = False) -> None:
+        if learn_screen and not ctx._provisional_ui_learning:
+            raise SafetyViolationError("Provisional UI recording is disabled.")
+        if (ctx._offline_fixture_configured or ctx.simulation_session or ctx.storage.db.simulation
+                or ctx.input_controller.is_dry_run_active()):
+            raise SafetyViolationError("Provisional UI capture is unavailable in fixture or dry-run mode.")
+        if isinstance(ctx.ocr_engine, MockOCREngine):
+            raise SafetyViolationError("Provisional UI capture requires real OCR.")
+
+    def capture_provisional_screen(hash_second: bool, *, require_pair: bool = False):
+        def observe(expected_scope: Optional[ObservationScope] = None):
+            frame, scope = ctx.capture_verification_frame(expected_scope=expected_scope)
+            items = ctx.ocr_engine.read_text(frame, event_tag="provisional_ui").items
+            summary = state_triage.summarize(frame, items)
+            digest = digest_bgr(frame) if hash_second and expected_scope is not None else None
+            ctx.require_observation_scope(scope)
+            return summary, scope, digest, items if expected_scope is not None else None
+
+        first, scope, _, _ = observe()
+        time.sleep(.12)
+        second, _, digest, items = observe(scope)
+        signature = fingerprint(first, second)
+        signatures = (signature,) if signature is not None else ()
+        if require_pair and signature is not None:
+            signatures = (fingerprint(first, first), signature)
+        return signatures, scope, digest, items
+
     @server.tool()
     @serial_action
     def identify_provisional_ui(record: bool = False) -> Dict[str, Any]:
@@ -1170,40 +1200,20 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         This is observation-only and returns no navigation state or action.
         Recording is opt-in and requires two fresh same-scope snapshots.
         """
-        def require_native() -> None:
-            if record and not ctx._provisional_ui_learning:
-                raise SafetyViolationError("Provisional UI recording is disabled.")
-            if (ctx._offline_fixture_configured or ctx.simulation_session or ctx.storage.db.simulation
-                    or ctx.input_controller.is_dry_run_active()):
-                raise SafetyViolationError("Provisional UI capture is unavailable in fixture or dry-run mode.")
-            if isinstance(ctx.ocr_engine, MockOCREngine):
-                raise SafetyViolationError("Provisional UI capture requires real OCR.")
-
-        def observe(expected_scope: Optional[ObservationScope] = None):
-            frame, scope = ctx.capture_verification_frame(expected_scope=expected_scope)
-            ocr = ctx.ocr_engine.read_text(frame, event_tag="provisional_ui")
-            summary = state_triage.summarize(frame, ocr.items)
-            digest = digest_bgr(frame) if record and expected_scope is not None else None
-            ctx.require_observation_scope(scope)
-            return summary, scope, digest
-
-        require_native()
-        first, scope, _ = observe()
-        time.sleep(.12)
-        second, _, digest = observe(scope)
-        signature = fingerprint(first, second)
+        require_provisional_native(learn_screen=record)
+        signatures, scope, digest, _ = capture_provisional_screen(record)
         response = {"game_id": scope.native_game_id, "state_name": "unknown", "action_suggested": False}
-        if signature is None:
+        if not signatures:
             return {**response, "status": "unstable_or_sparse", "provisional_id": None, "receipt_count": 0}
 
         def validate_before_commit() -> None:
-            require_native()
+            require_provisional_native(learn_screen=record)
             ctx.require_observation_scope(scope)
 
         validate_before_commit()
         receipt = (digest, ctx._native_evidence_token(scope)) if record else None
         result = ProvisionalScreenStore(ctx.storage.db).observe(
-            scope.native_game_id, signature, receipt=receipt, validate_before_commit=validate_before_commit,
+            scope.native_game_id, signatures[0], receipt=receipt, validate_before_commit=validate_before_commit,
         )
         validate_before_commit()
         return {**response, **asdict(result)}
@@ -1575,9 +1585,11 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         selector_id: Annotated[str, Field(min_length=1, max_length=128)],
         label: Annotated[str, Field(min_length=1, max_length=160)],
         record: bool = False,
+        provisional_id: Annotated[Optional[str], Field(pattern=PROVISIONAL_ID_PATTERN)] = None,
     ) -> Dict[str, Any]:
         """Read a unique OCR label in a known native UI state. No input is dispatched.
 
+        Anonymous provisional IDs require two fresh observations and return no coordinates.
         Optional recording is disabled by default. Repeated observations do not
         prove interactivity or grant permission to click.
         """
@@ -1595,43 +1607,80 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
         if record:
             require_learning_enabled()
-        if ctx._offline_fixture_configured:
-            raise SafetyViolationError("Selector observations need an attached native game.")
-        frame, scope = ctx.capture_verification_frame()
-        game_id = scope.native_game_id
-        if not game_id:
-            raise SafetyViolationError("Selector observations need an identified native game.")
-        detection = ctx.state_recognizer.recognize_state(
-            frame, game_id=game_id, simulation=scope.simulation, record_observation=False,
-        )
-        ctx.require_observation_scope(scope)
-        if detection.status != "known" or not .80 <= detection.confidence <= 1.0:
-            return {"game_id": game_id, "match": "unknown_state", "interactivity_verified": False}
+        if provisional_id is None:
+            if ctx._offline_fixture_configured:
+                raise SafetyViolationError("Selector observations need an attached native game.")
+            frame, scope = ctx.capture_verification_frame()
+            game_id = scope.native_game_id
+            if not game_id:
+                raise SafetyViolationError("Selector observations need an identified native game.")
+            detection = ctx.state_recognizer.recognize_state(
+                frame, game_id=game_id, simulation=scope.simulation, record_observation=False,
+            )
+            ctx.require_observation_scope(scope)
+            if detection.status != "known" or not .80 <= detection.confidence <= 1.0:
+                return {"game_id": game_id, "match": "unknown_state", "interactivity_verified": False}
 
-        recipe = SelectorRecipe(game_id, detection.state_name, selector_id, label)
-        recipe.validated()
-        ocr = ctx.ocr_engine.read_text(frame, event_tag="semantic_selector")
-        match = locate_exact_label(label, ocr.items)
-        ledger = SelectorEvidenceStore(ctx.storage.db)
+            recipe = SelectorRecipe(game_id, detection.state_name, selector_id, label)
+            recipe.validated()
+            items = ctx.ocr_engine.read_text(frame, event_tag="semantic_selector").items
+            digest = digest_bgr(frame) if record else None
+        else:
+            require_provisional_native()
+            signatures, scope, digest, items = capture_provisional_screen(record, require_pair=True)
+            game_id = scope.native_game_id
+            screens = ProvisionalScreenStore(ctx.storage.db)
+
+            def rematches() -> bool:
+                require_provisional_native()
+                ctx.require_observation_scope(scope)
+                if not signatures:
+                    return False
+                for signature in signatures:
+                    if signature is None:
+                        return False
+                    match = screens.observe(game_id, signature)
+                    if match.status != "provisional_match" or match.provisional_id != provisional_id:
+                        return False
+                return True
+
+            def unconfirmed() -> Dict[str, Any]:
+                return {"game_id": game_id, "state_name": "unknown", "provisional_id": None,
+                        "match": "provisional_unconfirmed", "bbox_normalized": None,
+                        "action_suggested": False, "interactivity_verified": False}
+
+            if not rematches():
+                return unconfirmed()
+            recipe = SelectorRecipe(game_id, PROVISIONAL_PREFIX + provisional_id, selector_id, label)
+
+        match = locate_exact_label(label, items)
+        ledger = SelectorEvidenceStore(ctx.storage.db, provisional_id=provisional_id)
         if record:
-            digest = digest_bgr(frame)
             ctx.require_observation_scope(scope)
             require_learning_enabled()
             def validate_before_commit() -> None:
                 ctx.require_observation_scope(scope)
                 require_learning_enabled()
+                # Recheck inside the same write transaction. Another writer
+                # cannot invalidate the screen between this check and commit.
+                if provisional_id is not None and not rematches():
+                    raise SafetyViolationError("Provisional selector screen is no longer confirmed.")
 
             evidence = ledger.record(
-                recipe, Receipt(uuid4().hex, digest, ctx._native_evidence_token(scope), game_id, detection.state_name,
-                                "live_observation"), ocr.items,
+                recipe, Receipt(uuid4().hex, digest, ctx._native_evidence_token(scope), game_id, recipe.state_name,
+                                "live_observation"), items,
                 validate_before_commit=validate_before_commit,
             )
         else:
             evidence = ledger.status(recipe)
         ctx.require_observation_scope(scope)
+        if provisional_id is not None and not rematches():
+            return unconfirmed()
         return {
-            "game_id": game_id, "state_name": detection.state_name, "selector_id": selector_id,
-            "match": match.status, "bbox_normalized": asdict(match.box) if match.box is not None else None,
+            "game_id": game_id, "state_name": recipe.state_name if provisional_id is None else "unknown",
+            "selector_id": selector_id, "match": match.status,
+            "bbox_normalized": asdict(match.box) if provisional_id is None and match.box is not None else None,
+            **({"provisional_id": provisional_id, "action_suggested": False} if provisional_id is not None else {}),
             "evidence": asdict(evidence), "interactivity_verified": False,
         }
 

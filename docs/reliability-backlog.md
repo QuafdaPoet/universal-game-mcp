@@ -322,3 +322,19 @@ the ONNX call by ~209 MB and ~252 MB, respectively; preprocessing had
 already increased the peak by ~44 MB and ~50 MB. Both output digests
 matched their previous instrumented baselines. These are point estimates
 on a static simulator, not live-game performance or an allocator trace.
+
+### Observation-only selector labels for provisional screens
+
+After `identify_provisional_ui` returns `provisional_match`, pass its
+`provisional_id` to `observe_ui_selector` with the selector ID and exact label.
+Two new same-attachment snapshots must be mutually stable and must each
+independently and uniquely match the same non-expired identity in the attached
+game. The second OCR result supplies the label evidence; no third scan is
+performed. `provisional_unconfirmed` returns neither coordinates nor evidence,
+and never falls back to a different screen. Even on success, the response
+keeps `state_name: "unknown"`, `bbox_normalized: null`, and grants no input
+authority. The reserved internal namespace is inaccessible to known-state
+selectors and to concept transfer. Only `record:true` with
+`UGM_SEMANTIC_SELECTOR_LEARNING=1` adds a receipt. Fixture, mock and dry-run
+reads or writes are excluded. Rollback and state-memory deletion remove
+these receipts together with their screen identities.

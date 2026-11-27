@@ -24,6 +24,8 @@ MIN_POSITIVES = 3
 MIN_ATTACHMENTS = 2
 MAX_RECEIPTS_PER_RECIPE = 128
 EVIDENCE_MAX_AGE_S = 30 * 24 * 3600
+PROVISIONAL_PREFIX = "provisional:"
+PROVISIONAL_ID_PATTERN = r"^provisional_[a-f0-9]{32}$"
 
 
 def digest_bgr(frame: np.ndarray) -> str:
@@ -92,10 +94,16 @@ class SelectorRecipe:
     selector_id: str
     label: str
 
-    def validated(self) -> tuple[tuple[str, str, str], str]:
+    def validated(self, *, provisional_id: str | None = None) -> tuple[tuple[str, str, str], str]:
         key = (self.game_id, self.state_name, self.selector_id)
         if any(not value.strip() or len(value) > 128 for value in key):
             raise ValueError("Invalid game, state or selector ID.")
+        if provisional_id is not None:
+            if (not re.fullmatch(PROVISIONAL_ID_PATTERN, provisional_id)
+                    or self.state_name != PROVISIONAL_PREFIX + provisional_id):
+                raise ValueError("Invalid provisional selector namespace.")
+        elif self.state_name.strip().casefold().startswith(PROVISIONAL_PREFIX):
+            raise ValueError("The provisional selector namespace is reserved.")
         if self.state_name.strip().casefold() in {"unknown", "ambiguous"}:
             raise ValueError("Selector recipes require a known state.")
         label = normalize_label(self.label)
@@ -133,11 +141,12 @@ class EvidenceStatus:
 
 
 class SelectorEvidenceStore:
-    def __init__(self, db: DatabaseManager):
+    def __init__(self, db: DatabaseManager, *, provisional_id: str | None = None):
         self.db = db
+        self._provisional_id = provisional_id
 
     def status(self, recipe: SelectorRecipe) -> EvidenceStatus:
-        key, label = recipe.validated()
+        key, label = recipe.validated(provisional_id=self._provisional_id)
         return self._status(self.db.get_connection(), key, label, time.time())
 
     @staticmethod
@@ -178,7 +187,7 @@ class SelectorEvidenceStore:
     ) -> EvidenceStatus:
         if self.db.simulation:
             raise ValueError("Live selector evidence cannot be written to a simulation database.")
-        key, label = recipe.validated()
+        key, label = recipe.validated(provisional_id=self._provisional_id)
         receipt.validate(recipe)
         result = locate_exact_label(label, items)
         conn = self.db.get_connection()

@@ -21,21 +21,21 @@ The AI model provides high-level reasoning and decision-making. Universal Game M
 
 ## ⚡ Measured Benchmark & Performance Profile
 
-Benchmarked on **AMD Ryzen 5 5500U** (6 Cores / 12 Threads, Windows 11 x64, integrated Radeon graphics) under pure CPU execution:
+The [Windows CI job for PR #27](https://github.com/QuafdaPoet/universal-game-mcp/actions/runs/45934304142/job/140293860935)
+measured these separate synthetic workloads. An RSS snapshot is the resident
+memory at one instant; a peak working set is the highest measured residency
+over the life of the process.
 
-| Subsystem | Measured Latency | Throughput / Notes |
+| Workload | Memory measure | Result |
 |---|---|---|
-| **Synthetic In-Memory Fixture Latency** | **1.79 ms** | In-memory memcpy baseline buffer grab |
-| **Visual Diff Verification** | **5.48 ms** | Real-time state verification (`cv2.absdiff` + threshold) |
-| **ROI Template Match (OpenCV)** | **43.97 ms** | **13.2x faster** than full screen (Multi-scale + NMS) |
-| **Full-Screen Template Match** | **579.94 ms** | Full 1080p scan |
-| **Event-driven ROI OCR** | **831.89 ms** | PP-OCRv4 CPU on target bounding box |
-| **Full-Screen 1080p OCR** | **2,185.15 ms** | Heavy; avoided at runtime via ROI crop |
-| **RAM Footprint (Steady State)** | **136.12 MB** | Entire engine, OCR runtime & SQLite in RAM (< 150 MB) |
+| Component benchmark (no MCP screenshot baseline cache) | Final process RSS | 145.25 MiB |
+| Cold two-thread RapidOCR, full 900×550 simulator image | Process peak working set after first OCR | 275.64 MB |
+| Cold two-thread RapidOCR, padded 153×82 crop of the same image | Process peak working set after first OCR | 292.37 MB |
 
-> [!NOTE]
-> Synthetic in-memory fixture benchmarks are explicitly distinguished from live DXGI desktop duplication captures to prevent misleading performance claims.
-
+Neither cold OCR workload meets the **250 MB peak** target. These results do
+not measure a live-game capture or gameplay session. See the
+[benchmark commands and interpretation](docs/reliability-backlog.md#cold-ocr-phase-profiling)
+to reproduce the cold and repeated runs.
 ---
 
 ## 🏗 Architecture (V2 Autonomous Exploration Infrastructure)
