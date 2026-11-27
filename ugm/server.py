@@ -54,6 +54,7 @@ from .skills.loader import GameSkillPack, GameSkillPackLoader
 from .adapters.hoi4.adapter import HOI4Adapter
 
 # V1.5 Subsystems
+from .memory.provisional_screens import ProvisionalScreenStore, fingerprint
 from .memory.selector_evidence import Receipt, SelectorEvidenceStore, SelectorRecipe, digest_bgr, locate_exact_label
 from .memory.database import DatabaseManager, SIMULATION_DB_SUFFIX
 from .memory.storage import PersistentKnowledgeStorage
@@ -166,9 +167,10 @@ class UGMContext:
         self._action_lock = Lock()
         self.exploration_budget = ExplorationBudget()
         self._semantic_selector_learning = os.environ.get("UGM_SEMANTIC_SELECTOR_LEARNING") == "1"
+        self._provisional_ui_learning = os.environ.get("UGM_PROVISIONAL_UI_LEARNING") == "1"
         # Accessed only under the action lease; a backend switch does not turn
         # the same attachment into a second independent observing session.
-        self._selector_attachment: tuple[int, str] | None = None
+        self._evidence_attachment: tuple[int, str] | None = None
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -508,6 +510,14 @@ class UGMContext:
         if not scope.fixture:
             self.capture_manager.require_attached_window(self.window_manager, window)
         return window
+
+    def _native_evidence_token(self, scope: ObservationScope) -> str:
+        """Caller holds the action lease and has confirmed the native scope."""
+        binding = self._evidence_attachment
+        if binding is None or binding[0] != scope.attachment_revision:
+            binding = (scope.attachment_revision, uuid4().hex)
+            self._evidence_attachment = binding
+        return binding[1]
 
     def bound_action_window(self, dry_run: bool) -> Optional[WindowInfo]:
         if self.input_controller.is_dry_run_active(dry_run):
@@ -1154,6 +1164,52 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     @server.tool()
     @serial_action
+    def identify_provisional_ui(record: bool = False) -> Dict[str, Any]:
+        """Recognize an anonymous screen independently of any game pack.
+
+        This is observation-only and returns no navigation state or action.
+        Recording is opt-in and requires two fresh same-scope snapshots.
+        """
+        def require_native() -> None:
+            if record and not ctx._provisional_ui_learning:
+                raise SafetyViolationError("Provisional UI recording is disabled.")
+            if (ctx._offline_fixture_configured or ctx.simulation_session or ctx.storage.db.simulation
+                    or ctx.input_controller.is_dry_run_active()):
+                raise SafetyViolationError("Provisional UI capture is unavailable in fixture or dry-run mode.")
+            if isinstance(ctx.ocr_engine, MockOCREngine):
+                raise SafetyViolationError("Provisional UI capture requires real OCR.")
+
+        def observe(expected_scope: Optional[ObservationScope] = None):
+            frame, scope = ctx.capture_verification_frame(expected_scope=expected_scope)
+            ocr = ctx.ocr_engine.read_text(frame, event_tag="provisional_ui")
+            summary = state_triage.summarize(frame, ocr.items)
+            digest = digest_bgr(frame) if record and expected_scope is not None else None
+            ctx.require_observation_scope(scope)
+            return summary, scope, digest
+
+        require_native()
+        first, scope, _ = observe()
+        time.sleep(.12)
+        second, _, digest = observe(scope)
+        signature = fingerprint(first, second)
+        response = {"game_id": scope.native_game_id, "state_name": "unknown", "action_suggested": False}
+        if signature is None:
+            return {**response, "status": "unstable_or_sparse", "provisional_id": None, "receipt_count": 0}
+
+        def validate_before_commit() -> None:
+            require_native()
+            ctx.require_observation_scope(scope)
+
+        validate_before_commit()
+        receipt = (digest, ctx._native_evidence_token(scope)) if record else None
+        result = ProvisionalScreenStore(ctx.storage.db).observe(
+            scope.native_game_id, signature, receipt=receipt, validate_before_commit=validate_before_commit,
+        )
+        validate_before_commit()
+        return {**response, **asdict(result)}
+
+    @server.tool()
+    @serial_action
     def get_recovery_guidance(game_id: Optional[str] = None) -> Dict[str, Any]:
         """List advisory destinations from a confirmed, stable native UI state.
 
@@ -1561,16 +1617,12 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             digest = digest_bgr(frame)
             ctx.require_observation_scope(scope)
             require_learning_enabled()
-            binding = ctx._selector_attachment
-            if binding is None or binding[0] != scope.attachment_revision:
-                binding = (scope.attachment_revision, uuid4().hex)
-                ctx._selector_attachment = binding
             def validate_before_commit() -> None:
                 ctx.require_observation_scope(scope)
                 require_learning_enabled()
 
             evidence = ledger.record(
-                recipe, Receipt(uuid4().hex, digest, binding[1], game_id, detection.state_name,
+                recipe, Receipt(uuid4().hex, digest, ctx._native_evidence_token(scope), game_id, detection.state_name,
                                 "live_observation"), ocr.items,
                 validate_before_commit=validate_before_commit,
             )

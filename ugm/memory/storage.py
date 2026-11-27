@@ -927,6 +927,10 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 deleted = conn.execute(q3, (game_id,) if game_id else ()).rowcount
                 if deleted:
                     deleted_counts["semantic_selector_recipes"] = deleted
+                q4 = "DELETE FROM provisional_screens" + (" WHERE game_id = ?" if game_id else "")
+                deleted = conn.execute(q4, (game_id,) if game_id else ()).rowcount
+                if deleted:
+                    deleted_counts["provisional_screens"] = deleted
 
         return {"deleted": deleted_counts, "game_id": game_id, "scope": scope}
 
@@ -1040,6 +1044,7 @@ class PersistentKnowledgeStorage(PersistentKnowledgeStorageContract):
                 # These observations are not part of the legacy snapshot.
                 # Force re-observation rather than trust potentially stale evidence.
                 conn.execute("DELETE FROM semantic_selector_recipes WHERE game_id = ?", (game_id,))
+                conn.execute("DELETE FROM provisional_screens WHERE game_id = ?", (game_id,))
                 # Observation history for a not-yet-active candidate cannot
                 # survive a rollback of the environment it was built against.
                 # Keep already-promoted archives for audit.

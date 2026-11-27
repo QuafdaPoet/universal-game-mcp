@@ -19,7 +19,7 @@ from .transition_quarantine import quarantine_transition, transition_identity
 
 logger = logging.getLogger("ugm.memory.database")
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 _SIMULATION_APPLICATION_ID = 0x55474D53  # 'UGMS'
 SIMULATION_DB_SUFFIX = ".simulation"
 
@@ -472,5 +472,31 @@ class DatabaseManager:
                 ON semantic_selector_receipts (game_id, state_name, selector_id, sequence_id);
             """)
             conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (6, ?)", (time.time(),))
+
+        if from_ver < 7 <= to_ver:
+            self._execute_migration_script(conn, """
+                CREATE TABLE provisional_screens (
+                    game_id TEXT NOT NULL,
+                    screen_id TEXT NOT NULL,
+                    anchors TEXT NOT NULL,
+                    thumbnail BLOB NOT NULL CHECK (length(thumbnail) = 2304),
+                    PRIMARY KEY (game_id, screen_id)
+                ) WITHOUT ROWID;
+
+                CREATE TABLE provisional_screen_receipts (
+                    game_id TEXT NOT NULL,
+                    screen_id TEXT NOT NULL,
+                    capture_sha256 TEXT NOT NULL,
+                    attachment_token TEXT NOT NULL,
+                    recorded_at REAL NOT NULL,
+                    PRIMARY KEY (game_id, capture_sha256),
+                    FOREIGN KEY (game_id, screen_id)
+                        REFERENCES provisional_screens (game_id, screen_id) ON DELETE CASCADE
+                ) WITHOUT ROWID;
+
+                CREATE INDEX idx_provisional_receipts_screen
+                ON provisional_screen_receipts (game_id, screen_id, recorded_at);
+            """)
+            conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (7, ?)", (time.time(),))
 
         logger.info("Database schema migration to v%d complete.", to_ver)

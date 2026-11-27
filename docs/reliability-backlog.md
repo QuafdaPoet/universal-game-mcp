@@ -291,3 +291,24 @@ and direct OCR call, not MCP timing, game observation, or an allocator
 trace. A phase can make allocations without increasing the existing OS
 high-water mark. A robust memory reduction must preserve small text and
 geometry; ROI speed alone does not establish the peak RAM target.
+
+### Anonymous screen memory for unfamiliar games
+
+`identify_provisional_ui` never assigns a navigation state. It compares
+two same-scope captures, uses 3–32 stable unique OCR anchors plus a small
+grayscale thumbnail, and declines near lookalikes and uncertain matches.
+A provisional identity starts recognizing repeat observations after three
+different frame digests from at least two attachments within 30 days.
+Identical pixels cannot add a receipt. Coordinates and labels are not
+returned; SQLite stores hashed labels with normalized positions, the
+64×36 grayscale thumbnail and receipt metadata, not full screenshots.
+
+Read-only by default; writes require `UGM_PROVISIONAL_UI_LEARNING=1` at
+startup and explicit `record:true` on a native call. Fixture, mock OCR,
+and dry-run calls cannot qualify. Storage is capped at 64 identities per
+game and 24 lifetime receipts per identity. Once capped, an identity
+cannot silently refresh its evidence window; review or clear the relevant
+game's state memory if needed. Clearing or rolling back state memory
+drops provisional records for that game. There is no fallback into
+`navigate_to`, `get_recovery_guidance`, or the legacy recognized states.
+Receipt and scope tests inject capture/OCR; native games remain untested.
