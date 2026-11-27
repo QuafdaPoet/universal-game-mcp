@@ -52,3 +52,23 @@ def test_dataset_save_when_enabled(tmp_path):
     assert "api_key" not in data["metadata"]
     assert data["metadata"]["game"] == "HOI4"
     assert data["metadata"]["turn"] == 42
+
+
+def test_dataset_fractional_edge_saves_only_one_pixel(tmp_path):
+    import cv2
+
+    collector = DatasetCollector(storage_dir=str(tmp_path), enabled=True)
+    frame = np.arange(48, dtype=np.uint8).reshape(4, 4, 3)
+    res = collector.save_sample(frame, tag="edge", roi=NormalizedRect(.99, .99, .01, .01))
+    assert res["dimensions"] == "1x1"
+    assert np.array_equal(cv2.imread(res["image_path"]), frame[-1:, -1:])
+
+
+def test_dataset_failed_png_does_not_leave_sidecar(tmp_path, monkeypatch):
+    import cv2
+
+    collector = DatasetCollector(storage_dir=str(tmp_path), enabled=True)
+    monkeypatch.setattr(cv2, "imwrite", lambda *args: False)
+    with pytest.raises(OSError, match="dataset sample image"):
+        collector.save_sample(np.zeros((4, 4, 3), dtype=np.uint8), tag="test")
+    assert list(tmp_path.iterdir()) == []

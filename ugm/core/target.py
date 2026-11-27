@@ -10,7 +10,7 @@ import time
 import re
 import base64
 import logging
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Callable
 import numpy as np
 import cv2
 
@@ -23,7 +23,8 @@ from .types import (
     VisionAgentEscalation,
     ClickResult,
     DetectionItem,
-    OCRItem
+    OCRItem,
+    HoverResult,
 )
 from .capture import CaptureManager
 from .ocr import BaseOCREngine
@@ -63,7 +64,8 @@ class TargetResolver:
         hover_verification: bool = False,
         expected_tooltip: Optional[str] = None,
         selector_id: Optional[str] = None,
-        dry_run: Optional[bool] = None
+        dry_run: Optional[bool] = None,
+        hover_reader: Optional[Callable[..., HoverResult]] = None,
     ) -> TargetResolution:
         """
         Locates target element, rejects ambiguity, and verifies features.
@@ -171,7 +173,7 @@ class TargetResolver:
                     resolved_cand = None
                     for c in candidates[:3]:  # probe up to top 3
                         nx, ny = c.center_normalized
-                        hover_res = self.verifier.hover_and_read_tooltip(
+                        hover_res = (hover_reader or self.verifier.hover_and_read_tooltip)(
                             norm_x=nx,
                             norm_y=ny,
                             duration_ms=250,
@@ -231,7 +233,7 @@ class TargetResolver:
                 winner.tooltip_text = f"[DRY-RUN] Tooltip simulated for '{expected_tooltip}'"
             else:
                 nx, ny = winner.center_normalized
-                hover_res = self.verifier.hover_and_read_tooltip(
+                hover_res = (hover_reader or self.verifier.hover_and_read_tooltip)(
                     norm_x=nx,
                     norm_y=ny,
                     duration_ms=250,
@@ -343,7 +345,7 @@ class TargetExecutor:
             )
 
         # Step 1: Capture pre-action baseline
-        pre_frame = self.capture_manager.capture(window=win)
+        pre_frame = None if effective_dry_run else self.capture_manager.capture(window=win)
 
         # Step 2: Dispatch input click
         click_res = self.input_controller.click(
@@ -355,9 +357,12 @@ class TargetExecutor:
         )
 
         if effective_dry_run or click_res.dry_run:
-            click_res.status = TargetStatus.SUCCESS.value
-            click_res.verification_passed = True
-            click_res.evidence = {"dry_run_simulated": True}
+            click_res.verification_passed = False
+            click_res.evidence = {
+                "dry_run_simulated": True,
+                "evidence_level": "simulated",
+                "simulation_accepted": click_res.status == TargetStatus.SUCCESS.value,
+            }
             return click_res
 
         if not click_res.executed:
@@ -380,6 +385,9 @@ class TargetExecutor:
 
         click_res.verification_passed = ver_res.verified
         click_res.evidence = {
+            "evidence_level": (
+                "verified" if ver_res.verified and (expected_text or min_diff_ratio > 0.0) else "observed"
+            ),
             "diff_ratio": ver_res.diff_ratio,
             "min_diff_required": min_diff_ratio,
             "verification_details": ver_res.details
