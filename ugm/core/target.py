@@ -25,8 +25,10 @@ from .types import (
     DetectionItem,
     OCRItem,
     HoverResult,
+    WindowInfo,
 )
 from .capture import CaptureManager
+from .safety import SafetyViolationError, EmergencyStopTriggered
 from .ocr import BaseOCREngine
 from .icon import IconDetector
 from .input import InputController
@@ -297,7 +299,11 @@ class TargetExecutor:
         expected_text: Optional[str] = None,
         verification_roi: Optional[NormalizedRect] = None,
         min_diff_ratio: float = 0.005,
-        timeout_s: float = 5.0
+        timeout_s: float = 5.0,
+        *,
+        target_window: Optional[WindowInfo] = None,
+        scoped_capture: Optional[Callable[[], np.ndarray]] = None,
+        verify: bool = True,
     ) -> ClickResult:
         """
         Executes click on target and verifies that intended visual state change succeeded.
@@ -308,7 +314,7 @@ class TargetExecutor:
 
         # Handle target resolution if provided
         if target_resolution is not None:
-            if target_resolution.status in (TargetStatus.NOT_FOUND.value, TargetStatus.AMBIGUOUS.value, "rejected"):
+            if target_resolution.status not in ("found", TargetStatus.SUCCESS.value):
                 return ClickResult(
                     x_normalized=0.0,
                     y_normalized=0.0,
@@ -345,7 +351,8 @@ class TargetExecutor:
             )
 
         # Step 1: Capture pre-action baseline
-        pre_frame = None if effective_dry_run else self.capture_manager.capture(window=win)
+        capture = scoped_capture or (lambda: self.capture_manager.capture(window=win))
+        pre_frame = capture() if verify and not effective_dry_run else None
 
         # Step 2: Dispatch input click
         click_res = self.input_controller.click(
@@ -353,7 +360,8 @@ class TargetExecutor:
             norm_y=norm_y,
             button=button,
             clicks=clicks,
-            dry_run=effective_dry_run
+            dry_run=effective_dry_run,
+            **({"target_window": target_window} if target_window is not None else {}),
         )
 
         if effective_dry_run or click_res.dry_run:
@@ -370,9 +378,24 @@ class TargetExecutor:
             click_res.status = TargetStatus.FAILED.value
             return click_res
 
+        if not verify:
+            click_res.verification_passed = False
+            click_res.evidence = {"evidence_level": "observed", "verification_skipped": True}
+            return click_res
+
         # Step 3: Wait stabilization interval and capture post-action frame
         time.sleep(0.08)
-        post_frame = self.capture_manager.capture(window=win)
+        try:
+            post_frame = capture()
+        except (SafetyViolationError, EmergencyStopTriggered, RuntimeError) as exc:
+            if scoped_capture is None:
+                raise
+            click_res.status = TargetStatus.FAILED.value
+            click_res.verification_passed = False
+            logger.info("Click verification interrupted after dispatch: %s", exc)
+            click_res.reason = "Click was dispatched, but its post-action capture could not be verified."
+            click_res.evidence = {"evidence_level": "observed", "verification_interrupted": True}
+            return click_res
 
         # Step 4: Verify state change
         ver_res = self.verifier.verify_selection(

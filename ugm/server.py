@@ -14,6 +14,7 @@ import logging
 import math
 from typing import Optional, List, Dict, Any, Annotated
 from dataclasses import asdict, dataclass, replace
+from functools import wraps
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
@@ -158,6 +159,7 @@ class UGMContext:
         self.dataset_collector = DatasetCollector(enabled=os.environ.get("UGM_DATASET_COLLECTION") == "1")
         self.pre_capture_cache: Dict[str, VerificationBaseline] = {}
         self._baseline_lock = Lock()
+        self._action_lock = Lock()
 
         # Register HOI4 Adapter
         self.hoi4_adapter = HOI4Adapter()
@@ -497,6 +499,23 @@ class UGMContext:
             self.capture_manager.require_attached_window(self.window_manager, window)
         return window
 
+    def bound_action_window(self, dry_run: bool) -> Optional[WindowInfo]:
+        if self.input_controller.is_dry_run_active(dry_run):
+            return None
+        current = self.window_manager.current_window
+        window = replace(current) if current is not None else None
+        self.capture_manager.require_attached_window(self.window_manager, window)
+        return window
+
+    def action_game_id(self, requested: Optional[str], dry_run: bool) -> str:
+        window = self.bound_action_window(dry_run)
+        if window is None:
+            return requested or self.active_game_id or "hoi4"
+        identified = game_id_for_window(window)
+        if requested is not None and requested != identified:
+            raise SafetyViolationError("Requested game_id does not match the attached game.")
+        return identified
+
     def capture_verification_frame(
         self, baseline: Optional[VerificationBaseline] = None, *, game_id: Optional[str] = None,
     ) -> tuple[np.ndarray, ObservationScope]:
@@ -526,8 +545,22 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         instructions="Universal Game MCP (UGM) allows AI agents to observe, read text, locate icons, interact safely, navigate menus, execute game skills, and learn verified procedural knowledge across game sessions."
     )
 
+    def serial_action(fn):
+        """Do not queue hardware sequences behind a snapshot that could be stale."""
+        @wraps(fn)
+        def guarded(*args, **kwargs):
+            if not ctx._action_lock.acquire(blocking=False):
+                raise SafetyViolationError("Another game action or attachment change is in progress; observe and retry.")
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                ctx._action_lock.release()
+
+        return guarded
+
     # 1. get_game_window
     @server.tool()
+    @serial_action
     def get_game_window(
         window_title: Optional[str] = "Hearts of Iron IV",
         process_name: Optional[str] = "hoi4.exe"
@@ -603,6 +636,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 4. locate_ui_element
     @server.tool()
+    @serial_action
     def locate_ui_element(
         selector_id: Optional[str] = None,
         icon_name: Optional[str] = None,
@@ -703,6 +737,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 5. hover_target
     @server.tool()
+    @serial_action
     def hover_target(
         x: float,
         y: float,
@@ -715,12 +750,14 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Moves the mouse cursor to normalized coordinates (x, y) [0.0 - 1.0] and hovers.
         If read_tooltip is True, isolates the popup tooltip and reads its text via OCR.
         """
-        if read_tooltip:
+        window = ctx.bound_action_window(dry_run)
+        if read_tooltip and (window is not None or ctx._offline_fixture_configured):
             hover_res = ctx.verifier.hover_and_read_tooltip(
                 norm_x=x,
                 norm_y=y,
                 duration_ms=duration_ms,
-                dry_run=dry_run
+                dry_run=dry_run,
+                target_window=window,
             )
             return hover_res.to_dict()
         else:
@@ -729,7 +766,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 norm_x=x,
                 norm_y=y,
                 duration_ms=duration_ms,
-                dry_run=dry_run
+                dry_run=dry_run,
+                target_window=window,
             )
             return {
                 "target_normalized": [x, y],
@@ -742,6 +780,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 6. click_target
     @server.tool()
+    @serial_action
     def click_target(
         x: Optional[float] = None,
         y: Optional[float] = None,
@@ -761,9 +800,15 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Safely clicks at normalized coordinates (x, y) or dynamically resolves target selector/query.
         When enabled, verification checks live visual state change. Dry-run has no verified outcome.
         """
-        norm_ver_roi = NormalizedRect(
-            verification_roi[0], verification_roi[1], verification_roi[2], verification_roi[3]
-        ) if verification_roi and len(verification_roi) == 4 else None
+        norm_ver_roi = _parse_observation_roi(verification_roi, "Verification")
+        window = ctx.bound_action_window(dry_run)
+        scope = ctx._observation_scope(window) if window is not None else None
+
+        def capture_bound_click_frame():
+            ctx.require_observation_scope(scope)
+            frame = ctx.capture_manager.capture_attached_window(ctx.window_manager, window)
+            ctx.require_observation_scope(scope)
+            return frame
 
         target_resolution = None
         if (x is None or y is None) and (selector_id or text_query or icon_name):
@@ -789,7 +834,18 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                         resolved_tooltip = sel.expected_tooltip_contains
                         break
 
-            frame = ctx.capture_manager.capture(window=ctx.window_manager.current_window)
+            if scope is None:
+                frame, lookup_scope = ctx.capture_verification_frame()
+            else:
+                frame, lookup_scope = capture_bound_click_frame(), scope
+
+            def read_bound_tooltip(**kwargs):
+                observed = ctx.require_observation_scope(lookup_scope)
+                rv = ctx.verifier.hover_and_read_tooltip(
+                    **kwargs, target_window=None if lookup_scope.fixture else observed,
+                )
+                ctx.require_observation_scope(lookup_scope)
+                return rv
             target_resolution = ctx.target_resolver.resolve_target(
                 frame=frame,
                 icon_name=resolved_icon_name,
@@ -799,8 +855,10 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
                 hover_verification=resolved_hover,
                 expected_tooltip=resolved_tooltip,
                 selector_id=selector_id,
-                dry_run=dry_run
+                dry_run=dry_run,
+                hover_reader=read_bound_tooltip,
             )
+            ctx.require_observation_scope(lookup_scope)
             if norm_ver_roi is None and resolved_roi:
                 norm_ver_roi = resolved_roi
 
@@ -814,12 +872,16 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
             expected_text=expected_text,
             verification_roi=norm_ver_roi,
             min_diff_ratio=min_diff_ratio if verify else 0.0,
-            timeout_s=timeout_s
+            timeout_s=timeout_s,
+            target_window=window,
+            scoped_capture=capture_bound_click_frame if scope is not None else None,
+            verify=verify,
         )
         return click_res.to_dict()
 
     # 7. press_keys
     @server.tool()
+    @serial_action
     def press_keys(
         keys: List[str],
         duration_ms: int = 100,
@@ -832,7 +894,8 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         res = ctx.input_controller.press_keys(
             keys=keys,
             duration_ms=duration_ms,
-            dry_run=dry_run
+            dry_run=dry_run,
+            target_window=ctx.bound_action_window(dry_run),
         )
         return res.to_dict()
 
@@ -1095,6 +1158,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 15. navigate_to
     @server.tool()
+    @serial_action
     def navigate_to(
         target_state: str,
         game_id: Optional[str] = None,
@@ -1105,7 +1169,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Safely navigates the game interface from current state to target destination state.
         Verifies resulting state after every single step and replans or halts safely on failure.
         """
-        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        target_game_id = ctx.action_game_id(game_id, dry_run)
         navigator = ctx.get_navigator(target_game_id)
         res = navigator.navigate_to(
             target_state=target_state,
@@ -1117,6 +1181,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 16. execute_skill
     @server.tool()
+    @serial_action
     def execute_skill(
         skill_id: str,
         game_id: Optional[str] = None,
@@ -1129,7 +1194,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
         Dry-run success only means the steps were accepted, not executed or verified.
         An actual postcondition match is indicated by post_verification_passed.
         """
-        target_game_id = game_id or ctx.active_game_id or "hoi4"
+        target_game_id = ctx.action_game_id(game_id, dry_run)
         res = ctx.skill_engine.execute_skill(
             skill_id=skill_id,
             game_id=target_game_id,
@@ -1248,6 +1313,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 22. discover_and_attach_game
     @server.tool()
+    @serial_action
     def discover_and_attach_game(
         window_title: Optional[str] = None,
         process_name: Optional[str] = None,
@@ -1309,6 +1375,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 24. probe_action
     @server.tool()
+    @serial_action
     def probe_action(
         action: str,
         params: Optional[Dict[str, Any]] = None,
@@ -1400,6 +1467,7 @@ def create_server(context: Optional[UGMContext] = None) -> MCPServer:
 
     # 27. rollback_knowledge_checkpoint
     @server.tool()
+    @serial_action
     def rollback_knowledge_checkpoint(
         checkpoint_id: int,
         game_id: Optional[str] = None
