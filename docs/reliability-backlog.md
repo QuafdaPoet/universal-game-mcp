@@ -65,15 +65,51 @@ Probe frames and probe input are checked against the same focused window, proces
 3. **V2.3:** Persistent goals, queue and hierarchical planning support for the external LLM. Test interruption, resumption and recovery before extending unattended sessions.
 4. **Ten-game matrix:** HOI4, Stellaris, Civilization VI, CK3, Victoria 3, RimWorld, Factorio, EU IV, Cities: Skylines II, Satisfactory. All are live-unverified by this branch until evidence is recorded for each. Record game version/mod, OS, resolution and UI scale, goal, provisioned knowledge, visible tool inventory, attempts, outcomes, latency/RSS, evidence tier, and blockers. For a zero-knowledge run, use a fresh UGM-only client profile and database, and verify that any separate game-specific state MCP or calculators (for example in Civilization VI or Factorio) are not exposed to the test agent. Do not count fixtures or CI as live results.
 
-## Windows live observation gate (no input)
+## Windows V2.1 observation gate (no input)
 
-Run on Windows 10/11 from the repo in an activated Python 3.12 environment with dependencies installed. Close multiplayer sessions. Open the offline game in windowed or borderless mode and show a static menu with a visible label in the current UI language. For example, at the English HOI4 main menu:
+Use a separate clone of the candidate, Windows 10/11 and Python 3.12. From
+the checkout root, run `python -m pip install -r requirements.txt`. Use a
+windowed or borderless **offline** game on its main menu, with no multiplayer
+session. Leave the game focused after the countdown. Start with vanilla HOI4:
 
 ```powershell
-python scripts/smoke_windows_game_observation.py --process hoi4.exe --title "Hearts of Iron IV" --expect-text "Single Player" --focus-delay 10
+python -m scripts.smoke_windows_game_observation --process hoi4.exe --title "Hearts of Iron IV" --expect-text "Single Player" --focus-delay 10 --window-mode borderless
 ```
 
-Switch to the game during the countdown. The script launches a separate dry-run server and temporary database; it tests a deliberately wrong title, then explicitly attaches, checks focused window identity and client-sized PNG capture, and verifies a known OCR marker. It does not call any input tools or save screenshots. The screenshot and OCR use separate captures; a pass in a static menu is not proof that the OCR refers to the returned PNG or that gameplay works. Record the commit, game version, client dimensions, display scaling, game UI scale, window mode and printed result. Once this gate passes, a separate read-only HOI4 scenario can use a paused disposable vanilla save: ask the agent to identify one visible production shortfall and cite the evidence for one proposed adjustment, without dispatching it. On failure, keep the output but do not change safety settings to obtain a pass.
+If the UI is not in English, use a clearly visible label in the active language.
+Then repeat on Stellaris, then Civilization VI, with no modded interface. For each,
+swap `--process` and `--title` for the actual game's executable basename from
+Task Manager's Details tab and the actual title (or a literal substring).
+Civ VI's process can vary by graphics mode. Do not select launcher executables.
+Supply `--game-version` and `--ui-scale` to record operator-reported metadata.
+
+- **Basic gate:** Wrong title must not attach. The intended focused process
+  must attach, produce a client-sized PNG, and return the expected OCR marker.
+  The screenshot and OCR use separate captures. Neither is written to disk.
+- **Stable unknown-state triage:** Add `--expect-anchor "Settings"`, replacing
+  the example with a short, exact visible label. At least two labels must recur
+  in two read-only captures. No known state, route or action is inferred.
+- **Optional anonymous learning:** Add `--learn-provisional` with
+  `--expect-anchor`. Stay on the same screen throughout. There must be a
+  stable set of 3–32 distinct OCR anchors, at least three distinct frame digests
+  across two attachments, a fresh read-only rematch, and a recorded receipt
+  for the exact label. A perfectly static, sparse or unstable menu may
+  legitimately be **not verified**. Do not disable safety or fabricate frame
+  changes; try a menu with subtle background animation if available.
+
+Every invocation uses a fresh temporary UGM database, no game pack, an
+allowlist of six observation tools and a hardware-input guard. No MCP endpoint
+is exposed. The default is dry-run; the optional native receipt test disables
+that setting only inside this guarded local harness. Neither mode writes game
+memory, saves, or configuration. Report the candidate commit and the final JSON
+line, which marks each stage pass, blocked, not verified or not run. The reported
+Windows peak working set is for this fresh UGM harness process (excluding the
+game and any separate AI client), not steady-state RSS. A peak above 250 MB
+leaves the RAM gate open. No menu result proves autonomous gameplay, skill
+execution, or rule discovery. Those require separate offline scenarios and
+evidence. Follow-up reference observation in HOI4: open a paused disposable
+vanilla save and identify a visible production shortfall without taking action.
+Keep the real-game matrix open until each game has run.
 
 ## Synthetic MCP capture memory
 
